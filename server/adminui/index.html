@@ -1,0 +1,529 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Liapi Admin</title>
+<style>
+:root{--bg:#0f1220;--panel:#171a2b;--panel2:#1f2338;--line:#2a2f4a;--text:#dbe2f0;--muted:#8a93b8;--acc:#5b8cff;--ok:#3ecf8e;--err:#ff5d7a;--warn:#ffc46b}
+*{box-sizing:border-box}
+body{margin:0;font:14px/1.5 -apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--text)}
+header{display:flex;align-items:center;gap:16px;padding:12px 20px;background:var(--panel);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:10}
+header h1{font-size:16px;margin:0;white-space:nowrap}
+nav{display:flex;gap:4px;flex:1;overflow-x:auto}
+nav button{background:transparent;border:1px solid transparent;color:var(--muted);padding:6px 12px;border-radius:8px;cursor:pointer;white-space:nowrap}
+nav button.active{color:#fff;background:var(--panel2);border-color:var(--line)}
+main{padding:20px;max-width:1200px;margin:0 auto}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px;margin-bottom:16px}
+.card h2{margin:0 0 12px;font-size:14px;color:var(--muted);font-weight:600}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:12px}
+.stat{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:12px 14px}
+.stat .v{font-size:22px;font-weight:700;margin-top:4px;word-break:break-all}
+.stat .k{color:var(--muted);font-size:12px}
+table{width:100%;border-collapse:collapse}
+th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);font-size:13px;vertical-align:top}
+th{color:var(--muted);font-weight:600;font-size:12px;white-space:nowrap}
+input,textarea,select{background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:8px 10px;font:inherit;width:100%}
+input:focus,textarea:focus,select:focus{outline:none;border-color:var(--acc)}
+label{display:block;color:var(--muted);font-size:12px;margin:10px 0 4px}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+button.btn{background:var(--acc);color:#fff;border:0;border-radius:8px;padding:8px 14px;cursor:pointer;font:inherit}
+button.sec{background:var(--panel2);color:var(--text);border:1px solid var(--line)}
+button.danger{background:transparent;color:var(--err);border:1px solid var(--err);border-radius:6px;padding:4px 8px;cursor:pointer}
+button.small{padding:4px 10px;font-size:12px}
+button:disabled{opacity:.5;cursor:not-allowed}
+.badge{display:inline-block;padding:2px 8px;border-radius:999px;font-size:12px}
+.badge.ok{background:rgba(62,207,142,.15);color:var(--ok)}
+.badge.err{background:rgba(255,93,122,.15);color:var(--err)}
+.badge.warn{background:rgba(255,196,107,.15);color:var(--warn)}
+.badge.gray{background:rgba(138,147,184,.15);color:var(--muted)}
+.muted{color:var(--muted)}
+.hidden{display:none}
+pre{background:#0b0e18;border:1px solid var(--line);border-radius:8px;padding:12px;overflow:auto;max-height:420px;font-size:12px;white-space:pre-wrap;word-break:break-all}
+textarea{resize:vertical;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;min-height:90px}
+.toolbar{display:flex;gap:10px;align-items:center;margin-bottom:12px;flex-wrap:wrap}
+.toolbar .spacer{flex:1}
+.empty{color:var(--muted);text-align:center;padding:24px 0}
+.toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:#222740;border:1px solid var(--line);padding:10px 16px;border-radius:10px;opacity:0;transition:opacity .2s;z-index:20;max-width:90vw}
+.toast.show{opacity:1}
+.checkbox-row{display:flex;align-items:center;gap:8px;margin-top:12px}
+.checkbox-row input{width:auto}
+.checkbox-row span{color:var(--muted);font-size:13px}
+.form-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:0 16px}
+@media(max-width:600px){.form-grid{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<header>
+  <h1>Liapi Admin</h1>
+  <nav id="nav">
+    <button data-tab="overview" class="active">概览</button>
+    <button data-tab="upstreams">上游</button>
+    <button data-tab="tokens">令牌</button>
+    <button data-tab="logs">日志</button>
+    <button data-tab="health">健康</button>
+    <button data-tab="debug">调试</button>
+  </nav>
+  <button class="btn sec" id="btnToken">设置 Token</button>
+</header>
+<main>
+
+  <section id="tab-overview" class="tab">
+    <div class="card">
+      <h2>概览</h2>
+      <div class="grid" id="statGrid"></div>
+    </div>
+  </section>
+
+  <section id="tab-upstreams" class="tab hidden">
+    <div class="card">
+      <div class="toolbar">
+        <h2 style="margin:0">上游配置</h2>
+        <div class="spacer"></div>
+        <button class="btn" id="btnNewUpstream">新增上游</button>
+      </div>
+      <div class="form-grid hidden" id="upForm" style="margin-bottom:16px">
+        <div>
+          <label>name *</label>
+          <input id="upName">
+          <label>base_url * (带版本前缀, 无尾斜杠, 如 https://api.openai.com/v1)</label>
+          <input id="upBase" placeholder="https://api.openai.com/v1">
+          <label>api_key (留空=保留原值)</label>
+          <input id="upKey" type="password" placeholder="sk-...">
+        </div>
+        <div>
+          <label>models * (逗号分隔, * 兜底)</label>
+          <input id="upModels" placeholder="gpt-4o,gpt-4o-mini">
+          <label>health_path</label>
+          <input id="upHealth" placeholder="/v1/models">
+          <label>retry</label>
+          <input id="upRetry" type="number" value="0" min="0">
+        </div>
+        <div>
+          <label>priority</label>
+          <input id="upPriority" type="number" value="1">
+          <label>weight</label>
+          <input id="upWeight" type="number" value="1" min="1">
+          <div class="checkbox-row">
+            <input type="checkbox" id="upDisabled"><span>disabled</span>
+          </div>
+          <div class="checkbox-row">
+            <input type="checkbox" id="upInject"><span>流式注入 include_usage</span>
+          </div>
+        </div>
+      </div>
+      <div class="row" style="margin-bottom:16px" id="upFormActions">
+        <button class="btn" id="btnSaveUp" style="display:none">保存</button>
+        <button class="btn sec" id="btnCancelUp" style="display:none">取消</button>
+      </div>
+      <table>
+        <thead><tr><th>name</th><th>base_url</th><th>models</th><th>prio</th><th>wt</th><th>key</th><th>状态</th><th></th></tr></thead>
+        <tbody id="upRows"></tbody>
+      </table>
+      <div class="empty hidden" id="upEmpty">还没有上游，点「新增上游」添加。</div>
+    </div>
+  </section>
+
+  <section id="tab-tokens" class="tab hidden">
+    <div class="card">
+      <h2>客户端令牌</h2>
+      <div class="row" style="margin-bottom:16px">
+        <input id="newToken" placeholder="输入新 token (如 sk-client-xxxx)" style="max-width:360px">
+        <button class="btn" id="btnAddToken">添加</button>
+      </div>
+      <table>
+        <thead><tr><th>token</th><th></th></tr></thead>
+        <tbody id="tokenRows"></tbody>
+      </table>
+      <div class="empty hidden" id="tokenEmpty">还没有客户端令牌。</div>
+    </div>
+  </section>
+
+  <section id="tab-logs" class="tab hidden">
+    <div class="card">
+      <div class="toolbar">
+        <h2 style="margin:0">最近日志</h2>
+        <div class="spacer"></div>
+        <button class="btn sec small" id="btnLogsRefresh">刷新</button>
+      </div>
+      <table>
+        <thead><tr><th>time</th><th>token</th><th>model</th><th>upstream</th><th>status</th><th>stream</th><th>lat</th><th>in/out</th><th>error</th></tr></thead>
+        <tbody id="logRows"></tbody>
+      </table>
+      <div class="empty hidden" id="logEmpty">暂无日志。</div>
+    </div>
+  </section>
+
+  <section id="tab-health" class="tab hidden">
+    <div class="card">
+      <h2>上游健康状态</h2>
+      <table>
+        <thead><tr><th>upstream</th><th>状态</th><th>延迟</th><th>连续失败</th><th>最后检查</th><th>错误</th></tr></thead>
+        <tbody id="healthRows"></tbody>
+      </table>
+      <div class="empty hidden" id="healthEmpty">没有启用的上游。</div>
+    </div>
+  </section>
+
+  <section id="tab-debug" class="tab hidden">
+    <div class="card">
+      <h2>调试：发送一条请求</h2>
+      <label>model</label>
+      <input id="dbgModel" list="modelList" placeholder="gpt-4o">
+      <datalist id="modelList"></datalist>
+      <label>messages (JSON 数组)</label>
+      <textarea id="dbgMessages">[{"role":"user","content":"你好，用一句话介绍自己。"}]</textarea>
+      <div class="row" style="margin-top:12px">
+        <label style="margin:0 8px 0 0"><input type="checkbox" id="dbgStream" style="width:auto"> stream</label>
+        <div class="spacer"></div>
+        <button class="btn" id="btnDebug">发送</button>
+      </div>
+      <pre id="dbgOut" class="hidden"></pre>
+    </div>
+  </section>
+
+</main>
+<div class="toast" id="toast"></div>
+<script>
+let TOKEN = localStorage.getItem('liapi_admin_token') || '';
+let currentTab = 'overview';
+
+// ---------- helpers ----------
+function toast(msg){
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.classList.add('show');
+  clearTimeout(el._t);
+  el._t = setTimeout(()=>el.classList.remove('show'), 2600);
+}
+
+function askToken(){
+  const t = prompt('请输入 admin token');
+  if (t === null) return false;
+  TOKEN = (t||'').trim();
+  if (TOKEN) localStorage.setItem('liapi_admin_token', TOKEN);
+  else localStorage.removeItem('liapi_admin_token');
+  return !!TOKEN;
+}
+
+async function api(path, opts = {}){
+  opts.headers = Object.assign({'Content-Type':'application/json'}, opts.headers || {});
+  if (TOKEN) opts.headers['Authorization'] = 'Bearer ' + TOKEN;
+  let res;
+  try { res = await fetch('/admin/api' + path, opts); }
+  catch(e){ throw new Error('网络错误: ' + e.message); }
+  if (res.status === 401){
+    if (!opts._retried && askToken()){
+      opts._retried = true;
+      return api(path, opts);
+    }
+    throw new Error('unauthorized');
+  }
+  const text = await res.text();
+  let data = {};
+  if (text) { try { data = JSON.parse(text); } catch(e) { data = {raw: text}; } }
+  if (!res.ok){
+    throw new Error((data.error && data.error.message) || text || ('HTTP ' + res.status));
+  }
+  return data;
+}
+
+function esc(s){
+  const d = document.createElement('div');
+  d.textContent = (s === undefined || s === null) ? '' : String(s);
+  return d.innerHTML;
+}
+
+const badge = (ok) => ok ? '<span class="badge ok">正常</span>' : '<span class="badge err">异常</span>';
+
+// ---------- tabs ----------
+document.getElementById('nav').addEventListener('click', (e)=>{
+  const b = e.target.closest('button');
+  if (!b) return;
+  currentTab = b.dataset.tab;
+  document.querySelectorAll('#nav button').forEach(x=>x.classList.toggle('active', x===b));
+  document.querySelectorAll('.tab').forEach(x=>x.classList.add('hidden'));
+  document.getElementById('tab-' + currentTab).classList.remove('hidden');
+  refreshTab(currentTab, true);
+});
+
+document.getElementById('btnToken').addEventListener('click', ()=>{ askToken(); toast('token 已更新'); });
+
+let timers = {};
+function refreshTab(tab, force){
+  const map = {
+    overview: loadOverview,
+    upstreams: loadUpstreams,
+    tokens: loadTokens,
+    logs: loadLogs,
+    health: loadHealth,
+    debug: loadModelList,
+  };
+  if (map[tab]) map[tab](force);
+}
+
+// ---------- overview ----------
+async function loadOverview(force){
+  try {
+    const d = await api('/overview');
+    const items = [
+      ['请求数', d.requests],
+      ['成功率', (d.success_rate||0).toFixed(1) + '%'],
+      ['平均延迟', d.avg_latency_ms + ' ms'],
+      ['in_token', fmtNum(d.in_tokens)],
+      ['out_token', fmtNum(d.out_tokens)],
+      ['费用(元)', d.cost.toFixed(4)],
+      ['客户端错误', d.client_errors],
+      ['上游错误', d.upstream_errors],
+      ['上游数', d.upstreams],
+      ['客户端token', d.client_tokens],
+      ['模型数', d.models],
+    ];
+    document.getElementById('statGrid').innerHTML = items.map(([k,v])=>
+      '<div class="stat"><div class="k">'+esc(k)+'</div><div class="v">'+esc(v)+'</div></div>'
+    ).join('');
+  } catch(e){ /* silent */ }
+}
+function fmtNum(n){
+  n = Number(n||0);
+  if (n >= 1e9) return (n/1e9).toFixed(2) + 'B';
+  if (n >= 1e6) return (n/1e6).toFixed(2) + 'M';
+  if (n >= 1e3) return (n/1e3).toFixed(2) + 'K';
+  return String(n);
+}
+
+// ---------- upstreams ----------
+async function loadUpstreams(){
+  const tbody = document.getElementById('upRows');
+  const empty = document.getElementById('upEmpty');
+  try {
+    const list = await api('/upstreams');
+    tbody.innerHTML = list.map((u)=>
+      '<tr>' +
+        '<td>'+esc(u.name)+'</td>' +
+        '<td>'+esc(u.base_url)+'</td>' +
+        '<td>'+esc((u.models||[]).join(', '))+'</td>' +
+        '<td>'+u.priority+'</td>' +
+        '<td>'+u.weight+'</td>' +
+        '<td>'+(u.has_api_key ? '<span class="muted">'+esc(u.api_key)+'</span>' : '<span class="badge warn">无key</span>')+'</td>' +
+        '<td>'+(u.disabled ? '<span class="badge gray">disabled</span>' : _healthBadge(u.name))+'</td>' +
+        '<td class="row" style="gap:6px">' +
+          '<button class="btn sec small" onclick="editUpstream(\''+escapeJs(u.name)+'\')">编辑</button>' +
+          '<button class="danger small" onclick="deleteUpstream(\''+escapeJs(u.name)+'\')">删</button>' +
+        '</td>' +
+      '</tr>'
+    ).join('');
+    empty.classList.toggle('hidden', list.length > 0);
+  } catch(e){ toast(e.message); }
+}
+function escapeJs(s){ return (s||'').replace(/'/g, "\\'"); }
+function _healthBadge(){ return '<span class="badge gray">—</span>'; }
+
+let healthCache = {};
+async function _loadHealthCache(){
+  try { healthCache = Object.fromEntries((await api('/health')).map(x=>[x.name, x])); }
+  catch(e){}
+}
+
+let editingName = null;
+function showUpForm(u){
+  if (u){
+    editingName = u.name;
+    document.getElementById('upName').value = u.name;
+    document.getElementById('upBase').value = u.base_url || '';
+    document.getElementById('upKey').value = u.api_key || '';
+    document.getElementById('upModels').value = (u.models||[]).join(',');
+    document.getElementById('upHealth').value = u.health_path || '';
+    document.getElementById('upRetry').value = u.retry || 0;
+    document.getElementById('upPriority').value = u.priority || 1;
+    document.getElementById('upWeight').value = u.weight || 1;
+    document.getElementById('upDisabled').checked = !!u.disabled;
+    document.getElementById('upInject').checked = !!u.inject_usage;
+  } else {
+    editingName = null;
+    ['upName','upBase','upKey','upModels','upHealth'].forEach(id=>document.getElementById(id).value='');
+    document.getElementById('upRetry').value = 0;
+    document.getElementById('upPriority').value = 1;
+    document.getElementById('upWeight').value = 1;
+    document.getElementById('upDisabled').checked = false;
+    document.getElementById('upInject').checked = false;
+  }
+  document.getElementById('upForm').classList.remove('hidden');
+  document.getElementById('btnCancelUp').style.display = '';
+  document.getElementById('btnSaveUp').style.display = '';
+}
+document.getElementById('btnNewUpstream').addEventListener('click', ()=>showUpForm(null));
+document.getElementById('btnCancelUp').addEventListener('click', ()=>{
+  document.getElementById('upForm').classList.add('hidden');
+  document.getElementById('btnCancelUp').style.display = 'none';
+  document.getElementById('btnSaveUp').style.display = 'none';
+  editingName = null;
+});
+document.getElementById('btnSaveUp').addEventListener('click', async ()=>{
+  const models = document.getElementById('upModels').value.split(',').map(s=>s.trim()).filter(Boolean);
+  const obj = {
+    name: document.getElementById('upName').value.trim(),
+    base_url: document.getElementById('upBase').value.trim(),
+    models,
+    health_path: document.getElementById('upHealth').value.trim(),
+    retry: Number(document.getElementById('upRetry').value)||0,
+    priority: Number(document.getElementById('upPriority').value)||0,
+    weight: Math.max(1, Number(document.getElementById('upWeight').value)||1),
+    disabled: document.getElementById('upDisabled').checked,
+    inject_usage: document.getElementById('upInject').checked,
+  };
+  if (document.getElementById('upKey').value) obj.api_key = document.getElementById('upKey').value;
+  try {
+    const path = editingName ? '/upstreams/' + encodeURIComponent(editingName) : '/upstreams';
+    const method = editingName ? 'PUT' : 'POST';
+    await api(path, {method, body: JSON.stringify(obj)});
+    toast('已保存');
+    document.getElementById('btnCancelUp').click();
+    loadUpstreams();
+  } catch(e){ toast(e.message); }
+});
+
+window.editUpstream = async function(name){
+  try {
+    const list = await api('/upstreams');
+    const u = list.find(x=>x.name === name);
+    if (u) showUpForm(u);
+  } catch(e){ toast(e.message); }
+};
+window.deleteUpstream = async function(name){
+  if (!confirm('删除上游 ' + name + ' ?')) return;
+  try {
+    await api('/upstreams/' + encodeURIComponent(name), {method:'DELETE'});
+    toast('已删除');
+    loadUpstreams();
+  } catch(e){ toast(e.message); }
+};
+
+// ---------- tokens ----------
+async function loadTokens(){
+  const tbody = document.getElementById('tokenRows');
+  const empty = document.getElementById('tokenEmpty');
+  try {
+    const list = await api('/tokens');
+    tbody.innerHTML = list.map((t)=>
+      '<tr><td><code>'+esc(t.masked)+'</code></td>' +
+      '<td><button class="danger small" onclick="deleteToken(\''+escapeJs(t.full)+'\')">删</button></td></tr>'
+    ).join('');
+    empty.classList.toggle('hidden', list.length > 0);
+  } catch(e){ toast(e.message); }
+}
+document.getElementById('btnAddToken').addEventListener('click', async ()=>{
+  const v = document.getElementById('newToken').value.trim();
+  if (!v){ toast('请输入 token'); return; }
+  try {
+    await api('/tokens', {method:'POST', body: JSON.stringify({token:v})});
+    document.getElementById('newToken').value = '';
+    toast('已添加');
+    loadTokens();
+  } catch(e){ toast(e.message); }
+});
+window.deleteToken = async function(full){
+  if (!confirm('删除该 token?')) return;
+  try {
+    await api('/tokens/delete', {method:'POST', body: JSON.stringify({token:full})});
+    toast('已删除');
+    loadTokens();
+  } catch(e){ toast(e.message); }
+};
+
+// ---------- logs ----------
+async function loadLogs(force){
+  const tbody = document.getElementById('logRows');
+  const empty = document.getElementById('logEmpty');
+  try {
+    const list = await api('/logs?n=100');
+    tbody.innerHTML = list.map((e)=>
+      '<tr>' +
+        '<td>'+esc(e.time.slice(11,19))+'</td>' +
+        '<td>'+esc(e.token)+'</td>' +
+        '<td>'+esc(e.model)+'</td>' +
+        '<td>'+esc(e.upstream||'-')+'</td>' +
+        '<td>'+esc(e.status)+'</td>' +
+        '<td>'+(e.stream?'Y':'')+'</td>' +
+        '<td>'+esc(e.latency_ms)+'ms</td>' +
+        '<td>'+esc(e.in_tokens)+'/'+esc(e.out_tokens)+'</td>' +
+        '<td class="muted" style="max-width:220px;word-break:break-all">'+esc(e.error)+'</td>' +
+      '</tr>'
+    ).join('');
+    empty.classList.toggle('hidden', list.length > 0);
+  } catch(e){ toast(e.message); }
+}
+document.getElementById('btnLogsRefresh').addEventListener('click', ()=>loadLogs(true));
+
+// ---------- health ----------
+async function loadHealth(){
+  const tbody = document.getElementById('healthRows');
+  const empty = document.getElementById('healthEmpty');
+  try {
+    const list = await api('/health');
+    tbody.innerHTML = list.map((h)=>
+      '<tr>' +
+        '<td>'+esc(h.name)+'</td>' +
+        '<td>'+badge(h.ok)+'</td>' +
+        '<td>'+esc(h.latency_ms)+'ms</td>' +
+        '<td>'+esc(h.consecutive_failures)+'</td>' +
+        '<td>'+esc(h.last_check||'-')+'</td>' +
+        '<td class="muted">'+esc(h.error||'')+'</td>' +
+      '</tr>'
+    ).join('');
+    empty.classList.toggle('hidden', list.length > 0);
+  } catch(e){ toast(e.message); }
+}
+
+// ---------- debug ----------
+async function loadModelList(){
+  try {
+    const cfg = await api('/config');
+    const names = new Set();
+    (cfg.upstreams||[]).forEach(u=>{
+      if (u.disabled) return;
+      (u.models||[]).forEach(m=>{ if (m !== '*') names.add(m); });
+    });
+    Object.keys(cfg.aliases||{}).forEach(m=>names.add(m));
+    document.getElementById('modelList').innerHTML =
+      [...names].map(m=>'<option value="'+esc(m)+'">').join('');
+  } catch(e){}
+}
+document.getElementById('btnDebug').addEventListener('click', async ()=>{
+  const btn = document.getElementById('btnDebug');
+  btn.disabled = true;
+  const out = document.getElementById('dbgOut');
+  out.classList.remove('hidden');
+  out.textContent = '请求中...';
+  let messages;
+  try {
+    messages = JSON.parse(document.getElementById('dbgMessages').value);
+  } catch(e){
+    out.textContent = 'messages 不是合法 JSON: ' + e.message;
+    btn.disabled = false;
+    return;
+  }
+  const body = {
+    model: document.getElementById('dbgModel').value.trim(),
+    messages,
+    stream: document.getElementById('dbgStream').checked,
+  };
+  try {
+    const d = await api('/test', {method:'POST', body: JSON.stringify(body)});
+    try {
+      out.textContent = JSON.stringify(d, null, 2);
+    } catch(e){ out.textContent = String(d); }
+  } catch(e){
+    out.textContent = '错误: ' + e.message;
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+// ---------- auto refresh ----------
+setInterval(()=>{ refreshTab(currentTab, false); }, 4000);
+
+refreshTab(currentTab, true);
+</script>
+</body>
+</html>
