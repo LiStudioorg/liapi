@@ -1,0 +1,190 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - '**'
+
+permissions:
+  contents: write
+
+jobs:
+  # ── 1. 枚举平台，并分流 ──────────────────────────
+  list-targets:
+    runs-on: ubuntu-latest
+    outputs:
+      linux_targets: ${{ steps.set.outputs.linux }}
+      mac_targets: ${{ steps.set.outputs.mac }}
+    steps:
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - id: set
+        run: |
+          # 全部平台列表
+          ALL=$(go tool dist list)
+
+          # Linux runner 上编译的平台（含 android，排除 ios）
+          LINUX=$(echo "$ALL" | grep -vE '^ios/' | awk -F/ '{printf "{\"goos\":\"%s\",\"goarch\":\"%s\"},", $1, $2}')
+          echo "linux=[${LINUX%,}]" >> "$GITHUB_OUTPUT"
+
+          # macOS runner 上编译的平台（仅 ios）
+          MAC=$(echo "$ALL" | grep -E '^ios/' | awk -F/ '{printf "{\"goos\":\"%s\",\"goarch\":\"%s\"},", $1, $2}')
+          echo "mac=[${MAC%,}]" >> "$GITHUB_OUTPUT"
+
+  # ── 2a. Linux runner：编译除 iOS 外全部平台 ──────
+  build-linux:
+    needs: list-targets
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.list-targets.outputs.linux_targets) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      # ── Android NDK 安装（仅 android 平台触发）──
+      - name: Setup Android NDK
+        if: startsWith(matrix.target.goos, 'android')
+        run: |
+          NDK_VERSION="r26d"
+          NDK_ZIP="android-ndk-${NDK_VERSION}-linux.zip"
+          curl -sSL -o "$NDK_ZIP" "https://dl.google.com/android/repository/${NDK_ZIP}"
+          unzip -q "$NDK_ZIP"
+          echo "NDK_ROOT=$PWD/android-ndk-${NDK_VERSION}" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$PWD/android-ndk-${NDK_VERSION}" >> "$GITHUB_ENV"
+
+      # ── 设置 Android CC/CXX ─────────────────────
+      - name: Set Android toolchain
+        if: startsWith(matrix.target.goos, 'android')
+        run: |
+          NDK="$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          case "${{ matrix.target.goarch }}" in
+            arm64) CC="aarch64-linux-android21-clang" ;;
+            arm)   CC="armv7a-linux-androideabi21-clang" ;;
+            amd64) CC="x86_64-linux-android21-clang" ;;
+            386)   CC="i686-linux-android21-clang" ;;
+          esac
+          echo "CC=$NDK/$CC" >> "$GITHUB_ENV"
+          echo "CXX=${CC/clang/clang++}" >> "$GITHUB_ENV"
+
+      # ── 编译 ────────────────────────────────────
+      - name: Build
+        continue-on-error: true
+        env:
+          GOOS: ${{ matrix.target.goos }}
+          GOARCH: ${{ matrix.target.goarch }}
+        run: |
+          set -e
+          APP=$(basename "$GITHUB_REPOSITORY")
+          VER=${GITHUB_REF_NAME#v}
+
+          # ★ 分流：android 用 CGO=1，其余用 CGO=0
+          if [ "${{ matrix.target.goos }}" = "android" ]; then
+            export CGO_ENABLED=1
+            LDFLAGS="-s -w -X main.version=${VER}"
+          else
+            export CGO_ENABLED=0
+            LDFLAGS="-s -w -X main.version=${VER} -linkmode external -extldflags -static"
+          fi
+
+          ext=""
+          case "$GOOS" in
+            windows) ext=".exe" ;;
+            js|wasip1) ext=".wasm" ;;
+          esac
+
+          mkdir -p dist
+          go build -trimpath -ldflags "$LDFLAGS" \
+            -o "dist/${APP}_${GOOS}_${GOARCH}${ext}" .
+
+          cd dist
+          if [ "$GOOS" = "windows" ]; then
+            zip -q "${APP}_${VER}_${GOOS}_${GOARCH}.zip" "${APP}_${GOOS}_${GOARCH}.exe"
+            rm "${APP}_${GOOS}_${GOARCH}.exe"
+          else
+            tar -czf "${APP}_${VER}_${GOOS}_${GOARCH}.tar.gz" "${APP}_${GOOS}_${GOARCH}"
+            rm "${APP}_${GOOS}_${GOARCH}"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bin-${{ matrix.target.goos }}-${{ matrix.target.goarch }}
+          path: dist/
+          if-no-files-found: ignore
+
+  # ── 2b. macOS runner：编译 iOS ──────────────────
+  build-macos:
+    needs: list-targets
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.list-targets.outputs.mac_targets) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      - name: Build iOS static library
+        continue-on-error: true
+        env:
+          GOOS: ${{ matrix.target.goos }}
+          GOARCH: ${{ matrix.target.goarch }}
+          CGO_ENABLED: '1'
+        run: |
+          set -e
+          APP=$(basename "$GITHUB_REPOSITORY")
+          VER=${GITHUB_REF_NAME#v}
+
+          # iOS 必须用 Xcode 的 clang
+          if [ "$GOARCH" = "arm64" ]; then
+            SDK="iphoneos"
+          else
+            SDK="iphonesimulator"
+          fi
+          export CC="$(xcrun -find clang) -arch $GOARCH -isysroot $(xcrun -sdk $SDK --show-sdk-path)"
+
+          mkdir -p dist
+          # iOS 通常编译为 c-archive（.a），而非可执行文件
+          go build -trimpath -buildmode=c-archive \
+            -ldflags "-s -w -X main.version=${VER}" \
+            -o "dist/${APP}_${GOOS}_${GOARCH}.a" .
+
+          cd dist
+          tar -czf "${APP}_${VER}_${GOOS}_${GOARCH}.tar.gz" "${APP}_${GOOS}_${GOARCH}.a"
+          rm "${APP}_${GOOS}_${GOARCH}.a"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bin-${{ matrix.target.goos }}-${{ matrix.target.goarch }}
+          path: dist/
+          if-no-files-found: ignore
+
+  # ── 3. 汇总发布 ─────────────────────────────────
+  release:
+    needs: [build-linux, build-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate checksums
+        run: |
+          cd artifacts
+          sha256sum * > checksums.txt
+          ls -lh
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true
+          draft: false
