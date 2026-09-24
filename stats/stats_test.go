@@ -159,6 +159,9 @@ func TestQuotaDaily(t *testing.T) {
 func TestAggregateQueryAndPercentiles(t *testing.T) {
 	a := NewAggregate()
 	base := time.Date(2026, 9, 23, 8, 0, 0, 0, time.UTC)
+	// Pin the clock so CostToday matches the entry day regardless of CI date.
+	now := base
+	a.SetNow(func() time.Time { return now })
 	// Spread latencies so P50 < P90 < P99 within known buckets.
 	lats := []int64{10, 20, 30, 40, 60, 80, 90, 120, 300, 4000}
 	for i, lat := range lats {

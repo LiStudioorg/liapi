@@ -20,6 +20,7 @@ type Aggregate struct {
 	byStat    map[int]int64 // status code -> count
 	total     *oneStat
 	costByDay map[string]float64
+	nowFn     func() time.Time
 }
 
 // Hist is a fixed-bucket latency histogram (milliseconds).
@@ -166,7 +167,17 @@ func NewAggregate() *Aggregate {
 		byStat:    make(map[int]int64),
 		total:     newOneStat(),
 		costByDay: make(map[string]float64),
+		nowFn:     time.Now,
 	}
+}
+
+// SetNow injects a fake clock (tests); nil keeps the current function.
+func (a *Aggregate) SetNow(fn func() time.Time) {
+	a.mu.Lock()
+	if fn != nil {
+		a.nowFn = fn
+	}
+	a.mu.Unlock()
 }
 
 func (a *Aggregate) model(m string) *oneStat {
@@ -389,10 +400,11 @@ func (a *Aggregate) TopDevices(n int) []StatRow {
 	return rows
 }
 
-// CostToday returns today's estimated cost (yuan).
+// CostToday returns today's estimated cost (yuan), using the (possibly
+// injected) clock for "today".
 func (a *Aggregate) CostToday() float64 {
-	day := time.Now().UTC().Format("2006-01-02")
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	day := a.nowFn().UTC().Format("2006-01-02")
 	return a.costByDay[day]
 }
