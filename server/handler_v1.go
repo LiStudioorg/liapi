@@ -81,30 +81,10 @@ func (s *Server) handleModelEndpoint(w http.ResponseWriter, r *http.Request, cli
 	}
 
 	// 1b. Token policy: expiry / IP allowlist / per-token RPM override.
-	if pol, polKey, ok := tokenPolicy(cfg, ident); ok {
-		if pol.ExpiresAt != "" {
-			if t, err := time.Parse(time.RFC3339, pol.ExpiresAt); err == nil && time.Now().After(t) {
-				common.WriteError(w, http.StatusUnauthorized, "token expired", "invalid_request_error", "token_expired")
-				status = http.StatusUnauthorized
-				errMsg = "token expired"
-				return
-			}
-		}
-		if !ipAllowed(clientIP(r), pol.AllowIPs) {
-			common.WriteError(w, http.StatusForbidden, "token not allowed from this ip", "permission_error", "ip_forbidden")
-			status = http.StatusForbidden
-			errMsg = "ip_forbidden"
-			return
-		}
-		if pol.RPM > 0 {
-			if !s.limiter.AllowN("tok:"+polKey, pol.RPM) {
-				s.metrics.IncRateLimited()
-				common.WriteError(w, http.StatusTooManyRequests, "rate limit exceeded, try again later", "rate_limit_error", "rate_limit_exceeded")
-				status = http.StatusTooManyRequests
-				errMsg = "rate_limit_exceeded"
-				return
-			}
-		}
+	if polOK, polStatus, polMsg := s.enforceTokenPolicy(w, r, cfg, ident); !polOK {
+		status = polStatus
+		errMsg = polMsg
+		return
 	}
 
 	// 2. Rate limit (per-device RPM override, else global sliding window).
@@ -256,6 +236,34 @@ func tokenPolicy(cfg *config.Config, ident *auth.Identity) (config.TokenPolicy, 
 	return config.TokenPolicy{}, "", false
 }
 
+// enforceTokenPolicy applies expiry / IP allowlist / per-token RPM for the
+// identity. Returns ok=false when a rejection response was written, together
+// with the status and a short message for the request log.
+func (s *Server) enforceTokenPolicy(w http.ResponseWriter, r *http.Request, cfg *config.Config, ident *auth.Identity) (bool, int, string) {
+	pol, polKey, ok := tokenPolicy(cfg, ident)
+	if !ok {
+		return true, 0, ""
+	}
+	if pol.ExpiresAt != "" {
+		if t, err := time.Parse(time.RFC3339, pol.ExpiresAt); err == nil && time.Now().After(t) {
+			common.WriteError(w, http.StatusUnauthorized, "token expired", "invalid_request_error", "token_expired")
+			return false, http.StatusUnauthorized, "token expired"
+		}
+	}
+	if !ipAllowed(clientIP(r), pol.AllowIPs) {
+		common.WriteError(w, http.StatusForbidden, "token not allowed from this ip", "permission_error", "ip_forbidden")
+		return false, http.StatusForbidden, "ip_forbidden"
+	}
+	if pol.RPM > 0 {
+		if !s.limiter.AllowN("tok:"+polKey, pol.RPM) {
+			s.metrics.IncRateLimited()
+			common.WriteError(w, http.StatusTooManyRequests, "rate limit exceeded, try again later", "rate_limit_error", "rate_limit_exceeded")
+			return false, http.StatusTooManyRequests, "rate_limit_exceeded"
+		}
+	}
+	return true, 0, ""
+}
+
 // countMultimodal counts image/audio/document parts in the request body
 // (OpenAI image_url / input_audio and Claude inline image blocks).
 func countMultimodal(body []byte) int {
@@ -338,8 +346,13 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		common.WriteError(w, http.StatusUnauthorized, "invalid or missing API key", "invalid_request_error", "invalid_api_key")
 		return
 	}
-
 	cfg := s.holder.Get()
+	// Same token policies as the model endpoints (expiry / IP / RPM).
+	if ident := s.clientAuth.Identify(r); ident != nil {
+		if ok, _, _ := s.enforceTokenPolicy(w, r, cfg, ident); !ok {
+			return
+		}
+	}
 	set := map[string]bool{}
 	for _, u := range cfg.Upstreams {
 		if !u.Enabled() {

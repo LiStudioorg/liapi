@@ -244,6 +244,12 @@ liapi/
 | `fallbacks` | 显式降级链：`{"模型": ["上游A","上游B"]}`，顺序严格优先于 priority/weight |
 | `alias_rules` | 正则别名 + 强制参数覆写（`params` 最后合并，覆盖客户端同名字段） |
 | `devices` | 设备 token：只存 SHA-256 `token_hash`，明文仅创建/轮换时返回一次 |
+| `token_policies` | 按 token/`dev:<id>` 的策略：`expires_at`（RFC3339 过期）、`allow_ips`（来源 IP 白名单）、`rpm`（覆盖全局限流） |
+| `alerts` | 运维告警：`webhooks`（通用 JSON POST）/ `bark`（Bark 推送）；`on_failover`/`on_unhealthy`/`on_quota` 分类开关；`quota_warn_percent`（默认 80）；`min_alert_interval_seconds`（去重窗口，默认 60） |
+| `log_retention_days` | 按天轮转的日志备份（`relay.jsonl.YYYY-MM-DD`）保留天数，0=永久 |
+| `log_raw_tokens` | `false`（默认）日志中 token 脱敏；`true` 记录明文（仅排查用） |
+| `group`（上游级） | 渠道分组标签；客户端带 `X-Route-Group: <组名>` 只路由到该组 |
+| `model_map`（上游级） | 模型名映射 `{"公开名":"上游真实名"}`，仅对该上游生效（发送前改写） |
 
 **配置文件权限**：`config.json` 含密钥，必须 `chmod 600`。liapi 启动时校验文件权限（Windows 跳过；`LIAPI_SKIP_PERM_CHECK=1` 仅限恢复场景）。`Save` 始终写 0600。
 
@@ -381,8 +387,11 @@ return failAll(lastErr)                       # 502 或透传最后一次的 sta
 | `/admin/api/devices/{id}` | PUT | 改 name/rpm/daily/note/disabled |
 | `/admin/api/devices/{id}/rotate` | POST | 轮换 token（旧的立即失效，新的只返回一次） |
 | `/admin/api/devices/{id}` | DELETE | 删除设备 |
-| `/admin/api/logs?n=` | GET | 最近 N 条日志（含 request_id / device） |
+| `/admin/api/logs?n=&q=&model=&status=&upstream=` | GET | 最近 N 条日志（含 request_id / device / multimodal），支持子串搜索与过滤 |
 | `/admin/api/health` | GET | 上游健康状态（重启后从 `health_state_file` 恢复） |
+| `/admin/api/health/probe` | POST | 立即探测全部上游（同步），结果写入探测历史 |
+| `/admin/api/health/history?n=` | GET | 探测历史环（最近 N 条，`manual=true` 标记手动探测） |
+| `/admin/api/audit?n=` | GET | 管理端访问审计环（IP / 路径 / 成功或拒绝原因） |
 | `/admin/api/test` | POST | 调试：{model, messages, stream} 直接发一条 |
 | `/admin/api/config` | GET | 当前配置（**密钥脱敏**，可直接回存：含 `...` 的值自动还原） |
 | `/admin/api/config` | POST | 整份替换并热重载（校验失败保留旧配置） |

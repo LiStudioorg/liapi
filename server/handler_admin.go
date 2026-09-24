@@ -89,6 +89,8 @@ func upstreamView(u config.Upstream) map[string]any {
 		"health_path":  u.EffectiveHealthPath(),
 		"retry":        u.Retry,
 		"inject_usage": u.InjectUsage,
+		"group":        u.Group,
+		"model_map":    u.ModelMap,
 	}
 }
 

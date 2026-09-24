@@ -114,6 +114,12 @@ textarea{resize:vertical;font-family:ui-monospace,Menlo,Consolas,monospace;font-
             <input type="checkbox" id="upInject"><span>流式注入 include_usage</span>
           </div>
         </div>
+        <div>
+          <label>分组 group（配合 X-Route-Group 请求头路由）</label>
+          <input id="upGroup" placeholder="如 free / pro">
+          <label>模型映射 model_map（JSON: 公开名→上游真实名）</label>
+          <input id="upModelMap" placeholder='{"gpt-4o":"gpt-4o-2024-11-20"}'>
+        </div>
       </div>
       <div class="row" style="margin-bottom:16px" id="upFormActions">
         <button class="btn" id="btnSaveUp" style="display:none">保存</button>
@@ -264,6 +270,18 @@ textarea{resize:vertical;font-family:ui-monospace,Menlo,Consolas,monospace;font-
       </table>
       <div class="empty hidden" id="histEmpty">暂无探测记录。</div>
     </div>
+    <div class="card">
+      <div class="toolbar">
+        <h2 style="margin:0">管理端审计日志（最近失败/成功访问）</h2>
+        <div class="spacer"></div>
+        <button class="btn sec small" id="btnAuditRefresh">刷新</button>
+      </div>
+      <table>
+        <thead><tr><th>time</th><th>ip</th><th>method</th><th>path</th><th>结果</th><th>原因</th></tr></thead>
+        <tbody id="auditRows"></tbody>
+      </table>
+      <div class="empty hidden" id="auditEmpty">暂无审计记录。</div>
+    </div>
   </section>
 
   <section id="tab-config" class="tab hidden">
@@ -383,7 +401,7 @@ function refreshTab(tab, force){
     devices: loadDevices,
     stats: loadStats,
     logs: loadLogs,
-    health: (f)=>{ loadHealth(f); loadHist(); },
+    health: (f)=>{ loadHealth(f); loadHist(); loadAudit(); },
     config: loadConfigText,
     debug: loadModelList,
   };
@@ -471,6 +489,8 @@ function showUpForm(u){
     document.getElementById('upWeight').value = u.weight || 1;
     document.getElementById('upDisabled').checked = !!u.disabled;
     document.getElementById('upInject').checked = !!u.inject_usage;
+    document.getElementById('upGroup').value = u.group || '';
+    document.getElementById('upModelMap').value = u.model_map ? JSON.stringify(u.model_map) : '';
   } else {
     editingName = null;
     ['upName','upBase','upKey','upModels','upHealth'].forEach(id=>document.getElementById(id).value='');
@@ -479,6 +499,8 @@ function showUpForm(u){
     document.getElementById('upWeight').value = 1;
     document.getElementById('upDisabled').checked = false;
     document.getElementById('upInject').checked = false;
+    document.getElementById('upGroup').value = '';
+    document.getElementById('upModelMap').value = '';
   }
   document.getElementById('upForm').classList.remove('hidden');
   document.getElementById('btnCancelUp').style.display = '';
@@ -503,7 +525,13 @@ document.getElementById('btnSaveUp').addEventListener('click', async ()=>{
     weight: Math.max(1, Number(document.getElementById('upWeight').value)||1),
     disabled: document.getElementById('upDisabled').checked,
     inject_usage: document.getElementById('upInject').checked,
+    group: document.getElementById('upGroup').value.trim(),
   };
+  const mm = document.getElementById('upModelMap').value.trim();
+  if (mm) {
+    try { obj.model_map = JSON.parse(mm); }
+    catch(e){ toast('model_map 不是合法 JSON'); return; }
+  }
   if (document.getElementById('upKey').value) obj.api_key = document.getElementById('upKey').value;
   try {
     const path = editingName ? '/upstreams/' + encodeURIComponent(editingName) : '/upstreams';
@@ -839,6 +867,26 @@ document.getElementById('btnProbeNow').addEventListener('click', async ()=>{
   btn.disabled = false;
 });
 document.getElementById('btnHistRefresh').addEventListener('click', loadHist);
+
+async function loadAudit(){
+  const tbody = document.getElementById('auditRows');
+  const empty = document.getElementById('auditEmpty');
+  try {
+    const list = await api('/audit?n=50');
+    tbody.innerHTML = list.map((a)=>
+      '<tr>' +
+        '<td>'+esc((a.time||'').slice(11,19))+'</td>' +
+        '<td>'+esc(a.ip)+'</td>' +
+        '<td>'+esc(a.method)+'</td>' +
+        '<td>'+esc(a.path)+'</td>' +
+        '<td>'+(a.ok?'<span class="badge ok">成功</span>':'<span class="badge err">拒绝</span>')+'</td>' +
+        '<td class="muted">'+esc(a.reason||'')+'</td>' +
+      '</tr>'
+    ).join('');
+    empty.classList.toggle('hidden', list.length > 0);
+  } catch(e){ toast(e.message); }
+}
+document.getElementById('btnAuditRefresh').addEventListener('click', loadAudit);
 
 // ---------- debug ----------
 async function loadModelList(){
