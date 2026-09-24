@@ -3,26 +3,30 @@ package stats
 import (
 	"encoding/json"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // Entry is one request log record (also one JSONL line).
 type Entry struct {
-	Time      string  `json:"time"`
-	RequestID string  `json:"request_id,omitempty"`
-	Token     string  `json:"token"`
-	Device    string  `json:"device,omitempty"`
-	Path      string  `json:"path"`
-	Model     string  `json:"model"`
-	Upstream  string  `json:"upstream"`
-	Status    int     `json:"status"`
-	Stream    bool    `json:"stream"`
-	LatencyMS int64   `json:"latency_ms"`
-	InTokens  int     `json:"in_tokens"`
-	OutTokens int     `json:"out_tokens"`
-	Cost      float64 `json:"cost"`
-	Error     string  `json:"error,omitempty"`
+	Time       string  `json:"time"`
+	RequestID  string  `json:"request_id,omitempty"`
+	Token      string  `json:"token"`
+	Device     string  `json:"device,omitempty"`
+	Path       string  `json:"path"`
+	Model      string  `json:"model"`
+	Upstream   string  `json:"upstream"`
+	Status     int     `json:"status"`
+	Stream     bool    `json:"stream"`
+	LatencyMS  int64   `json:"latency_ms"`
+	InTokens   int     `json:"in_tokens"`
+	OutTokens  int     `json:"out_tokens"`
+	Multimodal int     `json:"multimodal,omitempty"` // image/audio parts in the request body
+	Cost       float64 `json:"cost"`
+	Error      string  `json:"error,omitempty"`
 }
 
 // Ring is a fixed-size circular buffer (array + head index). Not a slice
@@ -77,16 +81,19 @@ func (r *Ring) Recent(n int) []Entry {
 // renamed to <path>.1 (replacing any previous backup) and a fresh file is
 // started. maxSize <= 0 disables rotation (SetDefaults always sets one).
 type Logger struct {
-	mu      sync.Mutex
-	file    *os.File
-	path    string
-	maxSize int64
-	written int64
-	ring    *Ring
-	ch      chan Entry
-	done    chan struct{}
-	dropped atomic.Uint64
-	closed  atomic.Bool
+	mu            sync.Mutex
+	file          *os.File
+	path          string
+	maxSize       int64
+	written       int64
+	ring          *Ring
+	ch            chan Entry
+	done          chan struct{}
+	dropped       atomic.Uint64
+	closed        atomic.Bool
+	curDay        string // YYYY-MM-DD of the active file (daily rotation)
+	rawTok        bool   // when true, tokens are written unmasked to disk
+	retentionDays int
 }
 
 func NewLogger(path string, ringSize int, maxSize int64) (*Logger, error) {
@@ -101,12 +108,36 @@ func NewLogger(path string, ringSize int, maxSize int64) (*Logger, error) {
 		ring:    NewRing(ringSize),
 		ch:      make(chan Entry, 4096),
 		done:    make(chan struct{}),
+		curDay:  time.Now().UTC().Format("2006-01-02"),
 	}
 	if fi, err := f.Stat(); err == nil {
 		l.written = fi.Size()
 	}
 	go l.run()
 	return l, nil
+}
+
+// SetRawTokens toggles writing the full token value into JSONL lines
+// (default: masked). Applies to entries queued after the call.
+func (l *Logger) SetRawTokens(on bool) {
+	l.mu.Lock()
+	l.rawTok = on
+	l.mu.Unlock()
+}
+
+// RawTokens reports whether the JSONL log stores tokens unmasked.
+func (l *Logger) RawTokens() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.rawTok
+}
+
+// SetRetentionDays sets how many rotated daily backups (path.YYYY-MM-DD)
+// to keep; 0 disables purging.
+func (l *Logger) SetRetentionDays(n int) {
+	l.mu.Lock()
+	l.retentionDays = n
+	l.mu.Unlock()
 }
 
 func (l *Logger) Log(e Entry) {
@@ -126,25 +157,105 @@ func (l *Logger) Recent(n int) []Entry { return l.ring.Recent(n) }
 
 func (l *Logger) run() {
 	defer close(l.done)
-	for e := range l.ch {
-		line, err := json.Marshal(e)
-		if err != nil {
+	purge := time.NewTicker(time.Hour)
+	defer purge.Stop()
+	for {
+		select {
+		case e, ok := <-l.ch:
+			if !ok {
+				return
+			}
+			l.writeEntry(e)
+		case <-purge.C:
+			l.purgeOld()
+		}
+	}
+}
+
+func (l *Logger) writeEntry(e Entry) {
+	line, err := json.Marshal(e)
+	if err != nil {
+		return
+	}
+	line = append(line, '\n')
+	l.mu.Lock()
+	// Daily rollover: start a fresh file when the UTC day changes.
+	day := time.Now().UTC().Format("2006-01-02")
+	if day != l.curDay {
+		l.rotateDailyLocked(l.curDay)
+		l.curDay = day
+	}
+	if l.maxSize > 0 && l.written+int64(len(line)) > l.maxSize && l.written > 0 {
+		l.rotateLocked()
+	}
+	n, werr := l.file.Write(line)
+	l.written += int64(n)
+	if werr != nil {
+		// Reopen once; if it still fails the entry is dropped (ring keeps it).
+		_ = l.file.Close()
+		l.file, _ = os.OpenFile(l.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	}
+	l.mu.Unlock()
+	l.ring.Add(e)
+}
+
+// rotateDailyLocked rolls the active file to <path>.YYYY-MM-DD, keeping the
+// previous days around for retention-based purging.
+func (l *Logger) rotateDailyLocked(prevDay string) {
+	if prevDay == "" {
+		return
+	}
+	_ = l.file.Close()
+	backup := l.path + "." + prevDay
+	_ = os.Remove(backup)
+	if err := os.Rename(l.path, backup); err != nil {
+		_ = os.Truncate(l.path, 0)
+	}
+	f, err := os.OpenFile(l.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		f, _ = os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	}
+	l.file = f
+	l.written = 0
+	l.purgeOldLocked()
+}
+
+// purgeOld removes rotated daily backups older than retentionDays.
+func (l *Logger) purgeOld() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.purgeOldLocked()
+}
+
+func (l *Logger) purgeOldLocked() {
+	if l.retentionDays <= 0 {
+		return
+	}
+	dir := filepath.Dir(l.path)
+	base := filepath.Base(l.path)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	cutoff := time.Now().UTC().AddDate(0, 0, -l.retentionDays).Format("2006-01-02")
+	for _, ent := range entries {
+		if ent.IsDir() {
 			continue
 		}
-		line = append(line, '\n')
-		l.mu.Lock()
-		if l.maxSize > 0 && l.written+int64(len(line)) > l.maxSize && l.written > 0 {
-			l.rotateLocked()
+		name := ent.Name()
+		if !strings.HasPrefix(name, base+".") {
+			continue
 		}
-		n, werr := l.file.Write(line)
-		l.written += int64(n)
-		if werr != nil {
-			// Reopen once; if it still fails the entry is dropped (ring keeps it).
-			_ = l.file.Close()
-			l.file, _ = os.OpenFile(l.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+		day := strings.TrimPrefix(name, base+".")
+		if len(day) != 10 {
+			continue
 		}
-		l.mu.Unlock()
-		l.ring.Add(e)
+		if _, err := time.Parse("2006-01-02", day); err != nil {
+			continue
+		}
+		if day < cutoff {
+			_ = os.Remove(filepath.Join(dir, name))
+		}
 	}
 }
 

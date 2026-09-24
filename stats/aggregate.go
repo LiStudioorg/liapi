@@ -79,14 +79,15 @@ func (h *Hist) Quantile(q float64) float64 {
 }
 
 type oneStat struct {
-	Requests  int64
-	Success   int64
-	Errors    int64
-	InTokens  int64
-	OutTokens int64
-	Cost      float64
-	LatencyMS int64 // sum, for avg
-	Hist      *Hist
+	Requests   int64
+	Success    int64
+	Errors     int64
+	InTokens   int64
+	OutTokens  int64
+	Multimodal int64
+	Cost       float64
+	LatencyMS  int64 // sum, for avg
+	Hist       *Hist
 }
 
 func newOneStat() *oneStat { return &oneStat{Hist: NewHist()} }
@@ -101,6 +102,7 @@ func (s *oneStat) add(e Entry) {
 	}
 	s.InTokens += int64(e.InTokens)
 	s.OutTokens += int64(e.OutTokens)
+	s.Multimodal += int64(e.Multimodal)
 	s.Cost += e.Cost
 	s.LatencyMS += e.LatencyMS
 	if s.Hist == nil {
@@ -136,17 +138,18 @@ func (g *bucketGroup) dev(d string) *oneStat {
 
 // StatRow is one aggregated row returned by the stats API / export.
 type StatRow struct {
-	Key      string  `json:"key"`
-	Requests int64   `json:"requests"`
-	Success  int64   `json:"success"`
-	Errors   int64   `json:"errors"`
-	InTok    int64   `json:"in_tokens"`
-	OutTok   int64   `json:"out_tokens"`
-	Cost     float64 `json:"cost"`
-	AvgMS    int64   `json:"avg_latency_ms"`
-	P50MS    int64   `json:"p50_ms"`
-	P90MS    int64   `json:"p90_ms"`
-	P99MS    int64   `json:"p99_ms"`
+	Key        string  `json:"key"`
+	Requests   int64   `json:"requests"`
+	Success    int64   `json:"success"`
+	Errors     int64   `json:"errors"`
+	InTok      int64   `json:"in_tokens"`
+	OutTok     int64   `json:"out_tokens"`
+	Multimodal int64   `json:"multimodal"`
+	Cost       float64 `json:"cost"`
+	AvgMS      int64   `json:"avg_latency_ms"`
+	P50MS      int64   `json:"p50_ms"`
+	P90MS      int64   `json:"p90_ms"`
+	P99MS      int64   `json:"p99_ms"`
 }
 
 // Snapshot is the full stats API payload.
@@ -323,6 +326,7 @@ func mergeStat(dst, src *oneStat) {
 	dst.Errors += src.Errors
 	dst.InTokens += src.InTokens
 	dst.OutTokens += src.OutTokens
+	dst.Multimodal += src.Multimodal
 	dst.Cost += src.Cost
 	dst.LatencyMS += src.LatencyMS
 	if dst.Hist == nil {
@@ -343,7 +347,7 @@ func mergeStat(dst, src *oneStat) {
 func rowOf(key string, s *oneStat) StatRow {
 	r := StatRow{
 		Key: key, Requests: s.Requests, Success: s.Success, Errors: s.Errors,
-		InTok: s.InTokens, OutTok: s.OutTokens, Cost: s.Cost,
+		InTok: s.InTokens, OutTok: s.OutTokens, Multimodal: s.Multimodal, Cost: s.Cost,
 	}
 	if s.Requests > 0 {
 		r.AvgMS = s.LatencyMS / s.Requests
@@ -360,7 +364,7 @@ func rowOf(key string, s *oneStat) StatRow {
 func (snap Snapshot) WriteCSV(w io.Writer) error {
 	cw := csv.NewWriter(w)
 	defer cw.Flush()
-	head := []string{"key", "requests", "success", "errors", "in_tokens", "out_tokens", "cost", "avg_latency_ms", "p50_ms", "p90_ms", "p99_ms"}
+	head := []string{"key", "requests", "success", "errors", "in_tokens", "out_tokens", "multimodal", "cost", "avg_latency_ms", "p50_ms", "p90_ms", "p99_ms"}
 	if err := cw.Write(head); err != nil {
 		return err
 	}
@@ -372,6 +376,7 @@ func (snap Snapshot) WriteCSV(w io.Writer) error {
 			strconv.FormatInt(r.Errors, 10),
 			strconv.FormatInt(r.InTok, 10),
 			strconv.FormatInt(r.OutTok, 10),
+			strconv.FormatInt(r.Multimodal, 10),
 			strconv.FormatFloat(r.Cost, 'f', 6, 64),
 			strconv.FormatInt(r.AvgMS, 10),
 			strconv.FormatInt(r.P50MS, 10),

@@ -217,11 +217,22 @@ textarea{resize:vertical;font-family:ui-monospace,Menlo,Consolas,monospace;font-
     <div class="card">
       <div class="toolbar">
         <h2 style="margin:0">最近日志</h2>
+        <input id="logQ" placeholder="搜索 model / upstream / 错误 / token…" style="max-width:260px">
+        <select id="logStatus" style="max-width:120px">
+          <option value="">全部状态</option>
+          <option value="200">200</option>
+          <option value="400">400</option>
+          <option value="401">401</option>
+          <option value="429">429</option>
+          <option value="500">500</option>
+          <option value="502">502</option>
+          <option value="504">504</option>
+        </select>
         <div class="spacer"></div>
         <button class="btn sec small" id="btnLogsRefresh">刷新</button>
       </div>
       <table>
-        <thead><tr><th>time</th><th>token</th><th>model</th><th>upstream</th><th>status</th><th>stream</th><th>lat</th><th>in/out</th><th>error</th></tr></thead>
+        <thead><tr><th>time</th><th>token</th><th>model</th><th>upstream</th><th>status</th><th>stream</th><th>lat</th><th>in/out</th><th>mm</th><th>error</th></tr></thead>
         <tbody id="logRows"></tbody>
       </table>
       <div class="empty hidden" id="logEmpty">暂无日志。</div>
@@ -230,12 +241,28 @@ textarea{resize:vertical;font-family:ui-monospace,Menlo,Consolas,monospace;font-
 
   <section id="tab-health" class="tab hidden">
     <div class="card">
-      <h2>上游健康状态</h2>
+      <div class="toolbar">
+        <h2 style="margin:0">上游健康状态</h2>
+        <div class="spacer"></div>
+        <button class="btn small" id="btnProbeNow">立即探测</button>
+      </div>
       <table>
         <thead><tr><th>upstream</th><th>状态</th><th>延迟</th><th>连续失败</th><th>最后检查</th><th>错误</th></tr></thead>
         <tbody id="healthRows"></tbody>
       </table>
       <div class="empty hidden" id="healthEmpty">没有启用的上游。</div>
+    </div>
+    <div class="card">
+      <div class="toolbar">
+        <h2 style="margin:0">探测历史</h2>
+        <div class="spacer"></div>
+        <button class="btn sec small" id="btnHistRefresh">刷新</button>
+      </div>
+      <table>
+        <thead><tr><th>time</th><th>upstream</th><th>状态</th><th>延迟</th><th>来源</th><th>错误</th></tr></thead>
+        <tbody id="histRows"></tbody>
+      </table>
+      <div class="empty hidden" id="histEmpty">暂无探测记录。</div>
     </div>
   </section>
 
@@ -356,7 +383,7 @@ function refreshTab(tab, force){
     devices: loadDevices,
     stats: loadStats,
     logs: loadLogs,
-    health: loadHealth,
+    health: (f)=>{ loadHealth(f); loadHist(); },
     config: loadConfigText,
     debug: loadModelList,
   };
@@ -378,6 +405,7 @@ async function loadOverview(force){
       ['客户端错误', d.client_errors],
       ['上游错误', d.upstream_errors],
       ['故障转移', d.failovers||0],
+      ['多模态部件', d.multimodal||0],
       ['上游数', d.upstreams],
       ['客户端token', d.client_tokens],
       ['设备数', d.devices||0],
@@ -734,7 +762,12 @@ async function loadLogs(force){
   const tbody = document.getElementById('logRows');
   const empty = document.getElementById('logEmpty');
   try {
-    const list = await api('/logs?n=100');
+    const q = encodeURIComponent(document.getElementById('logQ').value.trim());
+    const st = document.getElementById('logStatus').value;
+    let url = '/logs?n=200';
+    if (q) url += '&q=' + q;
+    if (st) url += '&status=' + encodeURIComponent(st);
+    const list = await api(url);
     tbody.innerHTML = list.map((e)=>
       '<tr>' +
         '<td>'+esc(e.time.slice(11,19))+'</td>' +
@@ -745,6 +778,7 @@ async function loadLogs(force){
         '<td>'+(e.stream?'Y':'')+'</td>' +
         '<td>'+esc(e.latency_ms)+'ms</td>' +
         '<td>'+esc(e.in_tokens)+'/'+esc(e.out_tokens)+'</td>' +
+        '<td>'+(e.multimodal?esc(e.multimodal):'')+'</td>' +
         '<td class="muted" style="max-width:220px;word-break:break-all">'+esc(e.error)+'</td>' +
       '</tr>'
     ).join('');
@@ -752,6 +786,8 @@ async function loadLogs(force){
   } catch(e){ toast(e.message); }
 }
 document.getElementById('btnLogsRefresh').addEventListener('click', ()=>loadLogs(true));
+document.getElementById('logQ').addEventListener('input', ()=>loadLogs(true));
+document.getElementById('logStatus').addEventListener('change', ()=>loadLogs(true));
 
 // ---------- health ----------
 async function loadHealth(){
@@ -772,6 +808,37 @@ async function loadHealth(){
     empty.classList.toggle('hidden', list.length > 0);
   } catch(e){ toast(e.message); }
 }
+
+async function loadHist(){
+  const tbody = document.getElementById('histRows');
+  const empty = document.getElementById('histEmpty');
+  try {
+    const list = await api('/health/history?n=50');
+    tbody.innerHTML = list.map((h)=>
+      '<tr>' +
+        '<td>'+esc((h.time||'').slice(11,19))+'</td>' +
+        '<td>'+esc(h.name)+'</td>' +
+        '<td>'+badge(h.ok)+'</td>' +
+        '<td>'+esc(h.latency_ms)+'ms</td>' +
+        '<td>'+(h.manual?'<span class="badge warn">手动</span>':'<span class="badge gray">定时</span>')+'</td>' +
+        '<td class="muted">'+esc(h.error||'')+'</td>' +
+      '</tr>'
+    ).join('');
+    empty.classList.toggle('hidden', list.length > 0);
+  } catch(e){ toast(e.message); }
+}
+
+document.getElementById('btnProbeNow').addEventListener('click', async ()=>{
+  const btn = document.getElementById('btnProbeNow');
+  btn.disabled = true;
+  try {
+    await api('/health/probe', {method:'POST', body:'{}'});
+    toast('探测完成');
+    await Promise.all([loadHealth(), loadHist(), _loadHealthCache()]);
+  } catch(e){ toast(e.message); }
+  btn.disabled = false;
+});
+document.getElementById('btnHistRefresh').addEventListener('click', loadHist);
 
 // ---------- debug ----------
 async function loadModelList(){

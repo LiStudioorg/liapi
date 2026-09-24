@@ -15,6 +15,12 @@ type Quota struct {
 	nowFn  func() time.Time
 	closed chan struct{}
 	once   sync.Once
+
+	// OnWarn, when set, fires once per key per day as usage crosses
+	// warnPercent of the effective limit (never when limit <= 0).
+	OnWarn      func(key string, used, limit, percent int)
+	warnPercent int
+	warned      map[string]string // key -> day already warned
 }
 
 type dayCount struct {
@@ -24,13 +30,22 @@ type dayCount struct {
 
 func NewQuota(limit int) *Quota {
 	q := &Quota{
-		limit:  limit,
-		used:   make(map[string]*dayCount),
-		nowFn:  time.Now,
-		closed: make(chan struct{}),
+		limit:       limit,
+		used:        make(map[string]*dayCount),
+		warned:      make(map[string]string),
+		warnPercent: 80,
+		nowFn:       time.Now,
+		closed:      make(chan struct{}),
 	}
 	go q.cleanLoop()
 	return q
+}
+
+// SetWarnPercent configures the usage warning threshold (0 disables).
+func (q *Quota) SetWarnPercent(p int) {
+	q.mu.Lock()
+	q.warnPercent = p
+	q.mu.Unlock()
 }
 
 func (q *Quota) SetNow(fn func() time.Time) {
@@ -63,7 +78,6 @@ func (q *Quota) AllowN(key string, limit int) bool {
 		return true
 	}
 	q.mu.Lock()
-	defer q.mu.Unlock()
 	day := q.nowFn().UTC().Format("2006-01-02")
 	c := q.used[key]
 	if c == nil || c.day != day {
@@ -71,9 +85,24 @@ func (q *Quota) AllowN(key string, limit int) bool {
 		q.used[key] = c
 	}
 	if c.count >= limit {
+		q.mu.Unlock()
 		return false
 	}
 	c.count++
+	shouldWarn := false
+	used := c.count
+	if q.OnWarn != nil && q.warnPercent > 0 && q.warned[key] != day {
+		pct := used * 100 / limit
+		if pct >= q.warnPercent {
+			q.warned[key] = day
+			shouldWarn = true
+		}
+	}
+	cb, lim, pct := q.OnWarn, limit, q.warnPercent
+	q.mu.Unlock()
+	if shouldWarn && cb != nil {
+		cb(key, used, lim, pct)
+	}
 	return true
 }
 

@@ -22,6 +22,8 @@ type Metrics struct {
 	Failovers     atomic.Uint64
 	Retries       atomic.Uint64
 	AdminDenied   atomic.Uint64
+	AdminLocked   atomic.Uint64
+	Multimodal    atomic.Uint64
 	LogDropped    func() uint64
 
 	mu         sync.Mutex
@@ -88,6 +90,12 @@ func (m *Metrics) IncRetry()         { m.Retries.Add(1) }
 func (m *Metrics) IncRateLimited()   { m.RateLimited.Add(1) }
 func (m *Metrics) IncQuotaExceeded() { m.QuotaExceeded.Add(1) }
 func (m *Metrics) IncAdminDenied()   { m.AdminDenied.Add(1) }
+func (m *Metrics) IncAdminLocked()   { m.AdminLocked.Add(1) }
+func (m *Metrics) AddMultimodal(n uint64) {
+	if n > 0 {
+		m.Multimodal.Add(n)
+	}
+}
 
 // AvgLatencyMS returns the running average (0 if no samples).
 func (m *Metrics) AvgLatencyMS() int64 {
@@ -117,6 +125,8 @@ func (m *Metrics) WritePrometheus(w http.ResponseWriter, health []HealthStatus) 
 	writeCounter("liapi_failovers_total", "Upstream failover events.", m.Failovers.Load())
 	writeCounter("liapi_retries_total", "Same-upstream retries.", m.Retries.Load())
 	writeCounter("liapi_admin_denied_total", "Rejected admin API attempts.", m.AdminDenied.Load())
+	writeCounter("liapi_admin_locked_out_total", "Admin attempts rejected by lockout.", m.AdminLocked.Load())
+	writeCounter("liapi_multimodal_parts_total", "Image/audio content parts observed in request bodies.", m.Multimodal.Load())
 	if m.LogDropped != nil {
 		writeCounter("liapi_log_dropped_total", "Log entries dropped under backpressure.", m.LogDropped())
 	}

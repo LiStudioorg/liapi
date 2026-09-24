@@ -48,17 +48,39 @@ type Price struct {
 	Output float64 `json:"output"`
 }
 
+// TokenPolicy is an optional per-token restriction. Keyed by token value (or
+// "dev:<device id>" for devices) in Config.TokenPolicies.
+type TokenPolicy struct {
+	ExpiresAt string   `json:"expires_at,omitempty"` // RFC3339; empty = never expires
+	AllowIPs  []string `json:"allow_ips,omitempty"`  // empty = any IP
+	RPM       int      `json:"rpm,omitempty"`        // 0 = use global/device limit
+}
+
+// AlertConfig selects where operational alerts (failover / unhealthy /
+// quota) are delivered. All destinations receive a JSON POST.
+type AlertConfig struct {
+	Webhooks          []string `json:"webhooks,omitempty"`
+	Bark              []string `json:"bark,omitempty"`
+	OnFailover        bool     `json:"on_failover"`
+	OnUnhealthy       bool     `json:"on_unhealthy"`
+	OnQuota           bool     `json:"on_quota"`
+	QuotaWarnPercent  int      `json:"quota_warn_percent"`         // warn when usage crosses this % (default 80)
+	MinAlertIntervalS int      `json:"min_alert_interval_seconds"` // dedup window, default 60
+}
+
 type Upstream struct {
-	Name        string   `json:"name"`
-	BaseURL     string   `json:"base_url"`
-	APIKey      string   `json:"api_key"`
-	Models      []string `json:"models"`
-	Priority    int      `json:"priority"`
-	Weight      int      `json:"weight"`
-	Disabled    bool     `json:"disabled"`
-	HealthPath  string   `json:"health_path"`
-	Retry       int      `json:"retry"`
-	InjectUsage bool     `json:"inject_usage"`
+	Name        string            `json:"name"`
+	BaseURL     string            `json:"base_url"`
+	APIKey      string            `json:"api_key"`
+	Models      []string          `json:"models"`
+	Priority    int               `json:"priority"`
+	Weight      int               `json:"weight"`
+	Disabled    bool              `json:"disabled"`
+	HealthPath  string            `json:"health_path"`
+	Retry       int               `json:"retry"`
+	InjectUsage bool              `json:"inject_usage"`
+	Group       string            `json:"group,omitempty"`     // channel group label (display only)
+	ModelMap    map[string]string `json:"model_map,omitempty"` // resolved model -> upstream model name
 }
 
 func (u *Upstream) Enabled() bool { return !u.Disabled }
@@ -102,37 +124,41 @@ type AliasRule struct {
 }
 
 type Config struct {
-	Addr               string              `json:"addr"`
-	BodyLimitBytes     int64               `json:"body_limit_bytes"`
-	Timeout            Duration            `json:"timeout"`
-	StreamTimeout      Duration            `json:"stream_timeout"`
-	StreamIdleTimeout  Duration            `json:"stream_idle_timeout"`
-	MaxIdleConns       int                 `json:"max_idle_conns"`
-	LogFile            string              `json:"log_file"`
-	LogMaxBytes        int64               `json:"log_max_bytes"`
-	RingSize           int                 `json:"ring_size"`
-	ProbeInterval      Duration            `json:"probe_interval"`
-	ProbeTimeout       Duration            `json:"probe_timeout"`
-	ProbeFailThreshold int                 `json:"probe_fail_threshold"`
-	ProbeConcurrency   int                 `json:"probe_concurrency"`
-	HealthStateFile    string              `json:"health_state_file"`
-	SkipUnhealthy      bool                `json:"skip_unhealthy"`
-	AdminToken         string              `json:"admin_token"`
-	AdminRatePerMinute int                 `json:"admin_rate_per_minute"`
-	AdminAllowIPs      []string            `json:"admin_allow_ips"`
-	MetricsToken       string              `json:"metrics_token"`
-	ClientTokens       []string            `json:"client_tokens"`
-	RateLimitPerMinute int                 `json:"rate_limit_per_minute"`
-	DailyPerToken      int                 `json:"daily_per_token"`
-	TokenQuotas        map[string]int      `json:"token_quotas"`
-	Aliases            map[string]string   `json:"aliases"`
-	AliasRules         []AliasRule         `json:"alias_rules"`
-	Prices             map[string]Price    `json:"prices"`
-	RouteStrategy      string              `json:"route_strategy"` // "" | latency | cost
-	Fallbacks          map[string][]string `json:"fallbacks"`      // model -> ordered upstream names
-	RetryOnTimeout     bool                `json:"retry_on_timeout"`
-	Upstreams          []Upstream          `json:"upstreams"`
-	Devices            []Device            `json:"devices"`
+	Addr               string                 `json:"addr"`
+	BodyLimitBytes     int64                  `json:"body_limit_bytes"`
+	Timeout            Duration               `json:"timeout"`
+	StreamTimeout      Duration               `json:"stream_timeout"`
+	StreamIdleTimeout  Duration               `json:"stream_idle_timeout"`
+	MaxIdleConns       int                    `json:"max_idle_conns"`
+	LogFile            string                 `json:"log_file"`
+	LogMaxBytes        int64                  `json:"log_max_bytes"`
+	RingSize           int                    `json:"ring_size"`
+	ProbeInterval      Duration               `json:"probe_interval"`
+	ProbeTimeout       Duration               `json:"probe_timeout"`
+	ProbeFailThreshold int                    `json:"probe_fail_threshold"`
+	ProbeConcurrency   int                    `json:"probe_concurrency"`
+	HealthStateFile    string                 `json:"health_state_file"`
+	SkipUnhealthy      bool                   `json:"skip_unhealthy"`
+	AdminToken         string                 `json:"admin_token"`
+	AdminRatePerMinute int                    `json:"admin_rate_per_minute"`
+	AdminAllowIPs      []string               `json:"admin_allow_ips"`
+	MetricsToken       string                 `json:"metrics_token"`
+	ClientTokens       []string               `json:"client_tokens"`
+	RateLimitPerMinute int                    `json:"rate_limit_per_minute"`
+	DailyPerToken      int                    `json:"daily_per_token"`
+	TokenQuotas        map[string]int         `json:"token_quotas"`
+	TokenPolicies      map[string]TokenPolicy `json:"token_policies"`
+	Alerts             AlertConfig            `json:"alerts"`
+	LogRetentionDays   int                    `json:"log_retention_days"` // purge rotated daily logs older than N days; 0 = keep forever
+	LogRawTokens       bool                   `json:"log_raw_tokens"`     // false (default) masks tokens in JSONL logs
+	Aliases            map[string]string      `json:"aliases"`
+	AliasRules         []AliasRule            `json:"alias_rules"`
+	Prices             map[string]Price       `json:"prices"`
+	RouteStrategy      string                 `json:"route_strategy"` // "" | latency | cost
+	Fallbacks          map[string][]string    `json:"fallbacks"`      // model -> ordered upstream names
+	RetryOnTimeout     bool                   `json:"retry_on_timeout"`
+	Upstreams          []Upstream             `json:"upstreams"`
+	Devices            []Device               `json:"devices"`
 }
 
 func (c *Config) SetDefaults() {
@@ -177,6 +203,12 @@ func (c *Config) SetDefaults() {
 	}
 	if c.StreamIdleTimeout.Duration == 0 {
 		c.StreamIdleTimeout.Duration = 10 * time.Minute
+	}
+	if c.Alerts.QuotaWarnPercent == 0 {
+		c.Alerts.QuotaWarnPercent = 80
+	}
+	if c.Alerts.MinAlertIntervalS == 0 {
+		c.Alerts.MinAlertIntervalS = 60
 	}
 }
 
@@ -223,6 +255,11 @@ func (c *Config) Validate() error {
 		if len(u.Models) == 0 {
 			return fmt.Errorf("upstream %q: models list is required (use [\"*\"] for catch-all)", u.Name)
 		}
+		for from, to := range u.ModelMap {
+			if strings.TrimSpace(from) == "" || strings.TrimSpace(to) == "" {
+				return fmt.Errorf("upstream %q: model_map keys/values must be non-empty", u.Name)
+			}
+		}
 	}
 
 	if c.AdminToken == "" {
@@ -258,6 +295,24 @@ func (c *Config) Validate() error {
 			}
 			seen[name] = true
 		}
+	}
+
+	// Token policies: expiry must parse when set; rpm >= 0.
+	for k, p := range c.TokenPolicies {
+		if p.ExpiresAt != "" {
+			if _, err := time.Parse(time.RFC3339, p.ExpiresAt); err != nil {
+				return fmt.Errorf("token_policies[%q]: invalid expires_at (want RFC3339): %v", k, err)
+			}
+		}
+		if p.RPM < 0 {
+			return fmt.Errorf("token_policies[%q]: rpm must be >= 0", k)
+		}
+	}
+	if c.Alerts.QuotaWarnPercent < 0 || c.Alerts.QuotaWarnPercent > 100 {
+		return errors.New("alerts.quota_warn_percent must be in [0,100]")
+	}
+	if c.LogRetentionDays < 0 {
+		return errors.New("log_retention_days must be >= 0")
 	}
 
 	// Alias rules: regex must compile, model required.

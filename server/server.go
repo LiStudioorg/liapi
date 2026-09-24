@@ -4,7 +4,9 @@ import (
 	"embed"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 
 	"liapi/auth"
 	"liapi/common"
@@ -31,6 +33,8 @@ type Server struct {
 	totals     *stats.Totals
 	metrics    *stats.Metrics
 	aggregate  *stats.Aggregate
+	alerter    *stats.Alerter
+	audit      *stats.Audit
 	configPath string
 }
 
@@ -51,15 +55,38 @@ func New(
 	metrics.LogDropped = logger.Dropped
 	agg := stats.NewAggregate()
 	quota := stats.NewQuota(cfg.DailyPerToken)
+	quota.SetWarnPercent(cfg.Alerts.QuotaWarnPercent)
 	adminLimit := stats.NewLimiter(cfg.AdminRatePerMinute)
+	audit := stats.NewAudit(500)
+	alerter := stats.NewAlerter(holder, rel.Client())
+	// Quota warning threshold alert (once per key per day, deduped inside).
+	quota.OnWarn = func(key string, used, limit, percent int) {
+		alerter.Notify("quota", key,
+			"额度即将用尽",
+			"key="+key+" 已用 "+itoa(used)+"/"+itoa(limit)+"（"+itoa(percent)+"%）")
+	}
 	// Wire relay → metrics (retry/failover events).
 	rel.SetObserver(func(kind, from, to string) {
 		if kind == "failover" {
 			metrics.ObserveFailover(from, to)
+			alerter.Notify("failover", from+"→"+to,
+				"上游故障转移",
+				"请求由 "+from+" 转移至 "+to)
 		} else {
 			metrics.IncRetry()
 		}
 	})
+	// Health threshold crossing → alert.
+	health.OnTransition = func(name string, healthy bool) {
+		if healthy {
+			alerter.Notify("recovered", name, "上游恢复", "上游 "+name+" 已恢复健康")
+		} else {
+			alerter.Notify("unhealthy", name, "上游不健康", "上游 "+name+" 连续探测失败已达阈值")
+		}
+	}
+	// Sync logger toggles from config (masking / retention).
+	logger.SetRawTokens(cfg.LogRawTokens)
+	logger.SetRetentionDays(cfg.LogRetentionDays)
 	return &Server{
 		holder:     holder,
 		router:     router,
@@ -74,9 +101,13 @@ func New(
 		totals:     totals,
 		metrics:    metrics,
 		aggregate:  agg,
+		alerter:    alerter,
+		audit:      audit,
 		configPath: configPath,
 	}
 }
+
+func itoa(n int) string { return strconv.Itoa(n) }
 
 // Metrics exposes the metrics registry (wired by main for /metrics).
 func (s *Server) Metrics() *stats.Metrics { return s.metrics }
@@ -125,6 +156,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /admin/api/devices/{id}/rotate", s.requireAdmin(s.adminRotateDevice))
 	mux.HandleFunc("GET /admin/api/logs", s.requireAdmin(s.adminLogs))
 	mux.HandleFunc("GET /admin/api/health", s.requireAdmin(s.adminHealth))
+	mux.HandleFunc("POST /admin/api/health/probe", s.requireAdmin(s.adminProbeNow))
+	mux.HandleFunc("GET /admin/api/health/history", s.requireAdmin(s.adminHealthHistory))
+	mux.HandleFunc("GET /admin/api/audit", s.requireAdmin(s.adminAudit))
 	mux.HandleFunc("POST /admin/api/test", s.requireAdmin(s.adminTest))
 	mux.HandleFunc("GET /admin/api/config", s.requireAdmin(s.adminGetConfig))
 	mux.HandleFunc("POST /admin/api/config", s.requireAdmin(s.adminReplaceConfig))
@@ -184,27 +218,52 @@ func ipAllowed(ip string, allow []string) bool {
 	return false
 }
 
-// requireAdmin enforces: IP allowlist → admin rate limit → admin token.
+// requireAdmin enforces: IP allowlist → lockout → admin rate limit → admin
+// token. Every attempt is recorded in the audit ring.
 func (s *Server) requireAdmin(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		cfg := s.holder.Get()
 		ip := clientIP(r)
+		audit := func(ok bool, reason string) {
+			s.audit.Add(stats.AuditEvent{
+				IP: ip, Method: r.Method, Path: r.URL.Path, OK: ok, Reason: reason,
+			})
+		}
 		if !ipAllowed(ip, cfg.AdminAllowIPs) {
 			s.metrics.IncAdminDenied()
+			audit(false, "ip_forbidden")
 			common.WriteError(w, http.StatusForbidden, "ip not allowed", "permission_error", "ip_forbidden")
+			return
+		}
+		if locked, until := s.adminAuth.Locked(ip); locked {
+			s.metrics.IncAdminLocked()
+			audit(false, "locked_out")
+			common.WriteError(w, http.StatusTooManyRequests,
+				"account temporarily locked after repeated failures ("+until.Round(time.Second).String()+" left)",
+				"rate_limit_error", "admin_locked")
 			return
 		}
 		// Rate limit keyed by IP (protects the token from brute force).
 		if !s.adminLimit.Allow("ip:" + ip) {
 			s.metrics.IncAdminDenied()
+			audit(false, "rate_limited")
 			common.WriteError(w, http.StatusTooManyRequests, "admin rate limit exceeded", "rate_limit_error", "rate_limit_exceeded")
 			return
 		}
 		if !s.adminAuth.Authenticate(r) {
 			s.metrics.IncAdminDenied()
+			lockedNow := s.adminAuth.RecordFailure(ip)
+			if lockedNow {
+				s.metrics.IncAdminLocked()
+				audit(false, "bad_token_locked")
+			} else {
+				audit(false, "bad_token")
+			}
 			common.WriteError(w, http.StatusUnauthorized, "invalid or missing admin token", "invalid_request_error", "invalid_admin_key")
 			return
 		}
+		s.adminAuth.ClearFailures(ip)
+		audit(true, "")
 		next(w, r)
 	}
 }

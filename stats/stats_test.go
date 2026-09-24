@@ -268,7 +268,7 @@ func TestHealthPersistRoundtrip(t *testing.T) {
 	path := filepath.Join(dir, "health.json")
 	cfg := ConfigForTest(path)
 	h := NewHealth(cfg, nil)
-	h.set("up1", &HealthStatus{Name: "up1", OK: false, ConsecutiveFailures: 2, LatencyMS: 7})
+	h.set("up1", &HealthStatus{Name: "up1", OK: false, ConsecutiveFailures: 2, LatencyMS: 7}, 3)
 	h.save()
 
 	// Reload into a fresh Health sharing the same state file.

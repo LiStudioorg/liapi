@@ -428,11 +428,87 @@ func (s *Server) adminLogs(w http.ResponseWriter, r *http.Request) {
 	if n > 1000 {
 		n = 1000
 	}
-	common.WriteJSON(w, http.StatusOK, s.logger.Recent(n))
+	// Filters: q (substring over model/upstream/path/error/token), model,
+	// status (exact), upstream. Fetch extra rows so filters still fill n.
+	entries := s.logger.Recent(maxInt(n*5, 500))
+	q := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
+	wantModel := strings.TrimSpace(r.URL.Query().Get("model"))
+	wantUp := strings.TrimSpace(r.URL.Query().Get("upstream"))
+	wantStatus := strings.TrimSpace(r.URL.Query().Get("status"))
+	out := make([]stats.Entry, 0, n)
+	for _, e := range entries {
+		if len(out) >= n {
+			break
+		}
+		if wantModel != "" && e.Model != wantModel {
+			continue
+		}
+		if wantUp != "" && e.Upstream != wantUp {
+			continue
+		}
+		if wantStatus != "" && strconv.Itoa(e.Status) != wantStatus {
+			continue
+		}
+		if q != "" {
+			blob := strings.ToLower(e.Model + " " + e.Upstream + " " + e.Path + " " + e.Error + " " + e.Token + " " + e.Device + " " + e.RequestID)
+			if !strings.Contains(blob, q) {
+				continue
+			}
+		}
+		out = append(out, e)
+	}
+	common.WriteJSON(w, http.StatusOK, out)
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func (s *Server) adminHealth(w http.ResponseWriter, r *http.Request) {
 	common.WriteJSON(w, http.StatusOK, s.health.All())
+}
+
+// adminProbeNow runs a synchronous probe pass (admin “立即探测” button).
+func (s *Server) adminProbeNow(w http.ResponseWriter, r *http.Request) {
+	st := s.health.ProbeNow()
+	common.WriteJSON(w, http.StatusOK, map[string]any{"ok": true, "upstreams": st})
+}
+
+// adminHealthHistory returns the recent probe history ring (newest first).
+func (s *Server) adminHealthHistory(w http.ResponseWriter, r *http.Request) {
+	n := 50
+	if v := r.URL.Query().Get("n"); v != "" {
+		if i, err := strconv.Atoi(v); err == nil {
+			n = i
+		}
+	}
+	if n < 1 {
+		n = 1
+	}
+	if n > 200 {
+		n = 200
+	}
+	common.WriteJSON(w, http.StatusOK, s.health.History(n))
+}
+
+// adminAudit returns the recent admin API audit log (newest first).
+func (s *Server) adminAudit(w http.ResponseWriter, r *http.Request) {
+	n := 100
+	if v := r.URL.Query().Get("n"); v != "" {
+		if i, err := strconv.Atoi(v); err == nil {
+			n = i
+		}
+	}
+	if n < 1 {
+		n = 1
+	}
+	if n > 500 {
+		n = 500
+	}
+	common.WriteJSON(w, http.StatusOK, s.audit.Recent(n))
 }
 
 func (s *Server) adminTest(w http.ResponseWriter, r *http.Request) {
@@ -470,7 +546,7 @@ func (s *Server) adminTest(w http.ResponseWriter, r *http.Request) {
 		common.WriteError(w, http.StatusInternalServerError, err.Error(), "internal_error", "")
 		return
 	}
-	candidates := s.router.Candidates(model)
+	candidates := s.router.Candidates(model, "")
 
 	out := map[string]any{"ok": false, "model": model}
 	result, failure := s.relay.Do(r.Context(), body, "/v1/chat/completions", req.Model, model, candidates, params, newRequestID())
@@ -743,6 +819,9 @@ func (s *Server) syncLimiters(next *config.Config) {
 	s.limiter.SetLimit(next.RateLimitPerMinute)
 	s.adminLimit.SetLimit(next.AdminRatePerMinute)
 	s.quota.SetLimit(next.DailyPerToken)
+	s.quota.SetWarnPercent(next.Alerts.QuotaWarnPercent)
+	s.logger.SetRawTokens(next.LogRawTokens)
+	s.logger.SetRetentionDays(next.LogRetentionDays)
 }
 
 // commitConfig validates, saves atomically, swaps the holder, then syncs the

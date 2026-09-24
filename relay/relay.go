@@ -264,7 +264,14 @@ func (rl *Relay) Do(ctx context.Context, body []byte, clientPath, originalModel,
 func (rl *Relay) tryOnce(ctx context.Context, up *config.Upstream, relPath string, body []byte, originalModel, model string, stream bool, params map[string]any, requestID string) (*Result, *Failure) {
 	cfg := rl.holder.Get()
 
-	reqBody := prepareBody(body, originalModel, model, stream, up.InjectUsage, params)
+	// Per-upstream model mapping (channel-level rename) wins over the
+	// alias-resolved name for this hop only.
+	finalModel := model
+	if to, ok := up.ModelMap[model]; ok && to != "" {
+		finalModel = to
+	}
+
+	reqBody := prepareBody(body, originalModel, finalModel, stream, up.InjectUsage, params)
 
 	target := up.BaseURL + relPath
 

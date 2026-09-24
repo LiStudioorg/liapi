@@ -25,6 +25,16 @@ type HealthStatus struct {
 	ConsecutiveFailures int    `json:"consecutive_failures"`
 }
 
+// ProbeEvent is one entry in the probe history ring (shown in admin UI).
+type ProbeEvent struct {
+	Time      string `json:"time"`
+	Name      string `json:"name"`
+	OK        bool   `json:"ok"`
+	LatencyMS int64  `json:"latency_ms"`
+	Error     string `json:"error,omitempty"`
+	Manual    bool   `json:"manual,omitempty"`
+}
+
 // Health background-probes enabled upstreams and stores results in memory.
 // An upstream is only marked unhealthy after probe_fail_threshold
 // consecutive failures (avoids flapping). Results are persisted (atomic
@@ -34,6 +44,13 @@ type Health struct {
 	client *http.Client
 	mu     sync.RWMutex
 	states map[string]*HealthStatus
+
+	histMu  sync.Mutex
+	history []ProbeEvent
+
+	// OnTransition is invoked when an upstream crosses the healthy/unhealthy
+	// threshold (nil = no alerts). Set once at wiring time.
+	OnTransition func(name string, healthy bool)
 
 	saveMu   sync.Mutex
 	savePath string
@@ -111,7 +128,11 @@ func (h *Health) All() []HealthStatus {
 	return out
 }
 
-func (h *Health) probeAll() {
+func (h *Health) probeAll() { h.probePass(false) }
+
+// probePass runs one full probe pass; manual marks history entries that came
+// from the admin “立即探测” button.
+func (h *Health) probePass(manual bool) {
 	cfg := h.holder.Get()
 	timeout := cfg.ProbeTimeout.Duration
 	if timeout <= 0 {
@@ -152,12 +173,51 @@ func (h *Health) probeAll() {
 			} else {
 				st.ConsecutiveFailures = prevFail + 1
 			}
-			_ = threshold
-			h.set(u.Name, &st)
+			h.recordHistory(st, manual)
+			h.set(u.Name, &st, threshold)
 		}(up)
 	}
 	wg.Wait()
 	h.save()
+}
+
+// ProbeNow runs a synchronous probe pass (admin "立即探测" button) and
+// records every result into the history ring.
+func (h *Health) ProbeNow() []HealthStatus {
+	h.probePass(true)
+	return h.All()
+}
+
+// History returns the newest n probe events, newest first.
+func (h *Health) History(n int) []ProbeEvent {
+	h.histMu.Lock()
+	defer h.histMu.Unlock()
+	if n <= 0 || n > len(h.history) {
+		n = len(h.history)
+	}
+	out := make([]ProbeEvent, n)
+	for i := 0; i < n; i++ {
+		out[i] = h.history[len(h.history)-1-i]
+	}
+	return out
+}
+
+func (h *Health) recordHistory(st HealthStatus, manual bool) {
+	ev := ProbeEvent{
+		Time:      time.Now().Format(time.RFC3339),
+		Name:      st.Name,
+		OK:        st.OK,
+		LatencyMS: st.LatencyMS,
+		Error:     st.Error,
+		Manual:    manual,
+	}
+	h.histMu.Lock()
+	const maxHist = 200
+	h.history = append(h.history, ev)
+	if len(h.history) > maxHist {
+		h.history = h.history[len(h.history)-maxHist:]
+	}
+	h.histMu.Unlock()
 }
 
 func (h *Health) probe(u *config.Upstream, timeout time.Duration) *HealthStatus {
@@ -200,10 +260,22 @@ func (h *Health) consecutive(name string) int {
 	return 0
 }
 
-func (h *Health) set(name string, st *HealthStatus) {
+func (h *Health) set(name string, st *HealthStatus, threshold int) {
+	if threshold <= 0 {
+		threshold = 3
+	}
 	h.mu.Lock()
+	prev := h.states[name]
 	h.states[name] = st
 	h.mu.Unlock()
+
+	unhealthy := func(s *HealthStatus) bool {
+		return s != nil && !s.OK && s.ConsecutiveFailures >= threshold
+	}
+	wasBad, nowBad := unhealthy(prev), unhealthy(st)
+	if wasBad != nowBad && h.OnTransition != nil {
+		h.OnTransition(name, !nowBad)
+	}
 }
 
 // persistShape is the on-disk format for health_state_file.

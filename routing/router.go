@@ -92,7 +92,8 @@ func (rt *Router) compiled(cfg *config.Config) []*regexp.Regexp {
 	return out
 }
 
-// Candidates returns upstreams that can serve the model.
+// Candidates returns upstreams that can serve the model. When group is
+// non-empty only upstreams in that channel group are considered.
 //
 // Selection order:
 //  1. fallbacks[model] — explicit ordered chain (validated in config).
@@ -103,12 +104,15 @@ func (rt *Router) compiled(cfg *config.Config) []*regexp.Regexp {
 //
 // Unhealthy upstreams are skipped when cfg.SkipUnhealthy is on — but only if
 // at least one healthy candidate remains (fallback to full list otherwise).
-func (rt *Router) Candidates(model string) []config.Upstream {
+func (rt *Router) Candidates(model string, group string) []config.Upstream {
 	cfg := rt.holder.Get()
 
 	var matched []config.Upstream
 	for _, u := range cfg.Upstreams {
 		if !u.Enabled() {
+			continue
+		}
+		if group != "" && u.Group != group {
 			continue
 		}
 		if u.Matches(model) {

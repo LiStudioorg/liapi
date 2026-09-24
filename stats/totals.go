@@ -11,6 +11,7 @@ type TotalsSnapshot struct {
 	LatencyMS      int64   `json:"latency_ms"`
 	InTokens       int64   `json:"in_tokens"`
 	OutTokens      int64   `json:"out_tokens"`
+	Multimodal     int64   `json:"multimodal"`
 	Cost           float64 `json:"cost"`
 }
 
@@ -38,6 +39,7 @@ func (t *Totals) Add(e Entry) {
 	s.LatencyMS += e.LatencyMS
 	s.InTokens += int64(e.InTokens)
 	s.OutTokens += int64(e.OutTokens)
+	s.Multimodal += int64(e.Multimodal)
 	s.Cost += e.Cost
 	t.mu.Unlock()
 }

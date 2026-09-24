@@ -32,14 +32,14 @@ func TestFallbackChainOrder(t *testing.T) {
 	rt := NewRouter(config.NewHolder(cfg), nil)
 	// Chain overrides priority: C (prio 9) must come first, strict order.
 	for i := 0; i < 20; i++ {
-		c := rt.Candidates("gpt-4o")
+		c := rt.Candidates("gpt-4o", "")
 		if len(c) != 3 || c[0].Name != "C" || c[1].Name != "A" || c[2].Name != "B" {
 			t.Fatalf("chain order not respected: %v", names(c))
 		}
 	}
 	// Disabled upstream in the chain is skipped, order otherwise kept.
 	cfg.Upstreams[1].Disabled = true
-	c := rt.Candidates("gpt-4o")
+	c := rt.Candidates("gpt-4o", "")
 	if len(c) != 2 || c[0].Name != "C" || c[1].Name != "A" {
 		t.Fatalf("disabled chain member should drop out: %v", names(c))
 	}
@@ -60,7 +60,7 @@ func TestLatencyStrategy(t *testing.T) {
 	fastFirst := 0
 	N := 100
 	for i := 0; i < N; i++ {
-		c := rt.Candidates("m")
+		c := rt.Candidates("m", "")
 		if c[0].Name == "fast" {
 			fastFirst++
 		}
@@ -85,7 +85,7 @@ func TestCostStrategy(t *testing.T) {
 	rt := NewRouter(config.NewHolder(cfg), nil)
 	seen := map[string]int{}
 	for i := 0; i < 10; i++ {
-		c := rt.Candidates("m")
+		c := rt.Candidates("m", "")
 		seen[c[0].Name]++
 	}
 	if len(seen) != 1 {
@@ -138,12 +138,12 @@ func TestSkipUnhealthyFallback(t *testing.T) {
 	}
 	h := &fakeHealth{ok: map[string]bool{"A": false, "B": false}}
 	rt := NewRouter(config.NewHolder(cfg), h)
-	c := rt.Candidates("m")
+	c := rt.Candidates("m", "")
 	if len(c) != 2 {
 		t.Fatalf("all-unhealthy must fall back to full list, got %v", names(c))
 	}
 	h.ok["B"] = true
-	c = rt.Candidates("m")
+	c = rt.Candidates("m", "")
 	if len(c) != 1 || c[0].Name != "B" {
 		t.Fatalf("healthy-only filter failed: %v", names(c))
 	}

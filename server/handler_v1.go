@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"liapi/auth"
 	"liapi/common"
 	"liapi/config"
 	"liapi/relay"
@@ -53,10 +54,11 @@ func (s *Server) handleModelEndpoint(w http.ResponseWriter, r *http.Request, cli
 		logModel  string
 		logToken  string
 		logDevice string
+		mmParts   int
 	)
 
 	defer func() {
-		s.record(r, reqID, logToken, logDevice, logModel, upstream, status, streamed, start, inTok, outTok, errMsg)
+		s.record(r, reqID, logToken, logDevice, logModel, upstream, status, streamed, start, inTok, outTok, errMsg, mmParts)
 	}()
 
 	// 1. Auth (device hash first, then legacy plaintext list).
@@ -70,8 +72,40 @@ func (s *Server) handleModelEndpoint(w http.ResponseWriter, r *http.Request, cli
 	if ident.Device != nil {
 		logDevice = ident.Device.ID
 	}
-
 	cfg := s.holder.Get()
+
+	// Log token: masked by default; log_raw_tokens=true stores the raw value.
+	logToken = ident.Token
+	if !cfg.LogRawTokens {
+		logToken = ident.Mask()
+	}
+
+	// 1b. Token policy: expiry / IP allowlist / per-token RPM override.
+	if pol, polKey, ok := tokenPolicy(cfg, ident); ok {
+		if pol.ExpiresAt != "" {
+			if t, err := time.Parse(time.RFC3339, pol.ExpiresAt); err == nil && time.Now().After(t) {
+				common.WriteError(w, http.StatusUnauthorized, "token expired", "invalid_request_error", "token_expired")
+				status = http.StatusUnauthorized
+				errMsg = "token expired"
+				return
+			}
+		}
+		if !ipAllowed(clientIP(r), pol.AllowIPs) {
+			common.WriteError(w, http.StatusForbidden, "token not allowed from this ip", "permission_error", "ip_forbidden")
+			status = http.StatusForbidden
+			errMsg = "ip_forbidden"
+			return
+		}
+		if pol.RPM > 0 {
+			if !s.limiter.AllowN("tok:"+polKey, pol.RPM) {
+				s.metrics.IncRateLimited()
+				common.WriteError(w, http.StatusTooManyRequests, "rate limit exceeded, try again later", "rate_limit_error", "rate_limit_exceeded")
+				status = http.StatusTooManyRequests
+				errMsg = "rate_limit_exceeded"
+				return
+			}
+		}
+	}
 
 	// 2. Rate limit (per-device RPM override, else global sliding window).
 	limit := cfg.RateLimitPerMinute
@@ -96,8 +130,10 @@ func (s *Server) handleModelEndpoint(w http.ResponseWriter, r *http.Request, cli
 	}
 	if !s.quota.AllowN(quotaKey, quotaLimit) {
 		s.metrics.IncQuotaExceeded()
+		s.alerter.Notify("quota", quotaKey, "每日配额已用尽", "key="+quotaKey+" 今日配额已打满")
 		common.WriteError(w, http.StatusTooManyRequests, "daily quota exceeded, try again tomorrow (UTC)", "rate_limit_error", "daily_quota_exceeded")
 		status = http.StatusTooManyRequests
+		errMsg = "daily_quota_exceeded"
 		return
 	}
 
@@ -120,8 +156,11 @@ func (s *Server) handleModelEndpoint(w http.ResponseWriter, r *http.Request, cli
 	model, params := s.router.ResolveAlias(model)
 	logModel = model
 
-	// 4. Route
-	candidates := s.router.Candidates(model)
+	// Count multimodal (image/audio) content parts for stats.
+	mmParts = countMultimodal(body)
+
+	// 4. Route (optional request-header group filter narrows candidates).
+	candidates := s.router.Candidates(model, strings.TrimSpace(r.Header.Get("X-Route-Group")))
 	if len(candidates) == 0 {
 		msg := fmt.Sprintf("no upstream configured for model %q", model)
 		common.WriteError(w, http.StatusBadGateway, msg, "invalid_request_error", "model_not_found")
@@ -162,28 +201,30 @@ func (s *Server) handleModelEndpoint(w http.ResponseWriter, r *http.Request, cli
 }
 
 // record writes one log entry (JSONL + ring + totals + aggregate + metrics).
-func (s *Server) record(r *http.Request, reqID, logToken, device, model, upstream string, status int, stream bool, start time.Time, in, out int, errMsg string) {
+func (s *Server) record(r *http.Request, reqID, logToken, device, model, upstream string, status int, stream bool, start time.Time, in, out int, errMsg string, mm int) {
 	cfg := s.holder.Get()
 	e := stats.Entry{
-		Time:      time.Now().Format(time.RFC3339),
-		RequestID: reqID,
-		Token:     logToken,
-		Device:    device,
-		Path:      r.URL.Path,
-		Model:     model,
-		Upstream:  upstream,
-		Status:    status,
-		Stream:    stream,
-		LatencyMS: time.Since(start).Milliseconds(),
-		InTokens:  in,
-		OutTokens: out,
-		Cost:      costFor(model, in, out, cfg.Prices),
-		Error:     errMsg,
+		Time:       time.Now().Format(time.RFC3339),
+		RequestID:  reqID,
+		Token:      logToken,
+		Device:     device,
+		Path:       r.URL.Path,
+		Model:      model,
+		Upstream:   upstream,
+		Status:     status,
+		Stream:     stream,
+		LatencyMS:  time.Since(start).Milliseconds(),
+		InTokens:   in,
+		OutTokens:  out,
+		Multimodal: mm,
+		Cost:       costFor(model, in, out, cfg.Prices),
+		Error:      errMsg,
 	}
 	s.totals.Add(e)
 	s.logger.Log(e)
 	s.aggregate.Add(e)
 	s.metrics.ObserveRequest(status, e.LatencyMS)
+	s.metrics.AddMultimodal(uint64(mm))
 }
 
 // costFor estimates cost in yuan: in/1e6*priceIn + out/1e6*priceOut.
@@ -196,6 +237,58 @@ func costFor(model string, in, out int, prices map[string]config.Price) float64 
 }
 
 var errBodyTooLarge = errors.New("body too large")
+
+// tokenPolicy returns the per-token policy for the authenticated identity
+// (keyed by raw token value, or "dev:<device id>" for devices).
+func tokenPolicy(cfg *config.Config, ident *auth.Identity) (config.TokenPolicy, string, bool) {
+	if ident == nil || len(cfg.TokenPolicies) == 0 {
+		return config.TokenPolicy{}, "", false
+	}
+	if ident.Device != nil {
+		key := "dev:" + ident.DeviceID
+		if p, ok := cfg.TokenPolicies[key]; ok {
+			return p, key, true
+		}
+	}
+	if p, ok := cfg.TokenPolicies[ident.Token]; ok {
+		return p, ident.Token, true
+	}
+	return config.TokenPolicy{}, "", false
+}
+
+// countMultimodal counts image/audio/document parts in the request body
+// (OpenAI image_url / input_audio and Claude inline image blocks).
+func countMultimodal(body []byte) int {
+	var v any
+	if err := json.Unmarshal(body, &v); err != nil {
+		return 0
+	}
+	return countMM(v)
+}
+
+func countMM(v any) int {
+	switch t := v.(type) {
+	case map[string]any:
+		n := 0
+		if typ, ok := t["type"].(string); ok {
+			switch typ {
+			case "image_url", "input_audio", "image", "document", "video":
+				n++
+			}
+		}
+		for _, vv := range t {
+			n += countMM(vv)
+		}
+		return n
+	case []any:
+		n := 0
+		for _, vv := range t {
+			n += countMM(vv)
+		}
+		return n
+	}
+	return 0
+}
 
 func readBody(w http.ResponseWriter, r *http.Request, limit int64) ([]byte, error) {
 	r.Body = http.MaxBytesReader(w, r.Body, limit)

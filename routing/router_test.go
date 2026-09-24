@@ -18,7 +18,7 @@ func TestCandidatesOrderByPriority(t *testing.T) {
 	holder := config.NewHolder(cfg)
 	rt := NewRouter(holder, nil)
 
-	c := rt.Candidates("gpt-4o")
+	c := rt.Candidates("gpt-4o", "")
 	if len(c) != 3 {
 		t.Fatalf("want 3 candidates, got %d", len(c))
 	}
@@ -38,7 +38,7 @@ func TestCandidatesNoMatch(t *testing.T) {
 	}
 	holder := config.NewHolder(cfg)
 	rt := NewRouter(holder, nil)
-	if c := rt.Candidates("gpt-3.5"); len(c) != 0 {
+	if c := rt.Candidates("gpt-3.5", ""); len(c) != 0 {
 		t.Fatalf("want no candidates, got %d", len(c))
 	}
 }
@@ -52,7 +52,7 @@ func TestCandidatesSkipDisabled(t *testing.T) {
 	}
 	holder := config.NewHolder(cfg)
 	rt := NewRouter(holder, nil)
-	c := rt.Candidates("gpt-4o")
+	c := rt.Candidates("gpt-4o", "")
 	if len(c) != 1 || c[0].Name != "B" {
 		t.Fatalf("disabled upstream should be skipped, got %v", c)
 	}
