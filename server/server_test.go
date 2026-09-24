@@ -26,6 +26,8 @@ func newTestServer(t *testing.T, mutate func(*config.Config)) (*Server, *config.
 		AdminToken:         "adm-secret-0123456789",
 		ClientTokens:       []string{"sk-client-0123456789"},
 		RateLimitPerMinute: 0,
+		HealthStateFile:    filepath.Join(dir, "health_state.json"),
+		LogFile:            filepath.Join(dir, "relay.jsonl"),
 	}
 	cfg.SetDefaults()
 	cfg.AdminToken = "adm-secret-0123456789"

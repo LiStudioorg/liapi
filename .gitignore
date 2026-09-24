@@ -4,3 +4,7 @@
 /health_state.json
 /pid.txt
 /relay.jsonl
+/dist/
+**/health_state.json
+**/relay.jsonl*
+/android-ndk-*/
