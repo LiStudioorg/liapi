@@ -97,9 +97,19 @@ func (s *Server) Handler() http.Handler {
 	// Observability (metrics token OR admin token)
 	mux.HandleFunc("GET /metrics", s.handleMetrics)
 
-	// Admin UI + API (admin auth)
-	mux.HandleFunc("GET /admin", s.adminUI)
-	mux.HandleFunc("GET /admin/", s.adminUI)
+	// Admin UI at / (primary); /admin kept as redirect for old bookmarks.
+	mux.HandleFunc("GET /{$}", s.adminUI)
+	mux.HandleFunc("GET /admin", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/", http.StatusMovedPermanently)
+	})
+	mux.HandleFunc("GET /admin/", func(w http.ResponseWriter, r *http.Request) {
+		// Only exact /admin/ (no API path) → redirect; API falls through below.
+		if r.URL.Path == "/admin/" {
+			http.Redirect(w, r, "/", http.StatusMovedPermanently)
+			return
+		}
+		s.adminUI(w, r)
+	})
 	mux.HandleFunc("GET /admin/api/overview", s.requireAdmin(s.adminOverview))
 	mux.HandleFunc("GET /admin/api/upstreams", s.requireAdmin(s.adminListUpstreams))
 	mux.HandleFunc("POST /admin/api/upstreams", s.requireAdmin(s.adminAddUpstream))

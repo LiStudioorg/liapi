@@ -18,7 +18,7 @@ go build -o liapi .
 ./liapi -config config.json   # first run generates config.json (mode 0600)
 ```
 
-Open the admin UI at `http://localhost:8787/admin` (admin token is printed on first start, masked thereafter — keep the file).
+Open the admin UI at `http://localhost:8787/` (admin token is printed on first start, masked thereafter — keep the file).
 
 ## Before You Submit a PR
 

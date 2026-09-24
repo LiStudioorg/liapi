@@ -48,12 +48,12 @@
                      │   │      └─ 用量统计             │
                      │   └─ 日志（JSONL + 环形缓冲）    │
                      │                               │
-                     │  /admin/api/*  管理接口         │
-                     │  /admin        内嵌管理台(单文件)│
-                     │                               │
-                     │  后台：健康检查 goroutine        │
-                     │       环形日志缓冲 / 用量聚合    │
-                     └───────────────────────────────┘
+│  /admin/api/*  管理接口         │
+│  /            内嵌管理台(单文件)│
+│                               │
+│  后台：健康检查 goroutine        │
+│       环形日志缓冲 / 用量聚合    │
+└───────────────────────────────┘
                         │          │           │
                  ┌──────┴───┐ ┌────┴────┐ ┌────┴─────┐
                  │ OpenAI   │ │ OpenRouter│ │ Ollama   │ ...
@@ -110,9 +110,13 @@ liapi/
 
 ---
 
-## 五、配置文件设计
+## 五、配置
 
-默认读取 `./config.json`，可用 `-config <path>` 指定。
+**全部配置通过 Web 管理台完成**：打开 `http://<host>:8787/` → 输入 admin token → 所有字段（上游、令牌、设备、路由、限流等）都在界面里改，保存即热重载。
+
+`config.json` 仅作为**首次启动引导**（含 `admin_token`、`addr` 等，自动生成，之后由 Web 界面接管）。默认路径 `./config.json`，可用 `-config <path>` 指定。
+
+管理台「配置」Tab 提供 JSON 视图与导入/导出；字段含义见下方速查表（与 `config/config.go` 中的 struct tag 对应）。
 
 ```jsonc
 {
@@ -364,7 +368,7 @@ return failAll(lastErr)                       # 502 或透传最后一次的 sta
 
 | 路径 | 方法 | 说明 |
 |---|---|---|
-| `/admin` | GET | 管理台单页（go:embed，含设备/统计/配置编辑） |
+| `/` | GET | 管理台单页（go:embed，含设备/统计/配置编辑）；`/admin` 301 → `/` |
 | `/admin/api/overview` | GET | 请求数 / 成功率 / 平均延迟 / token 量 / 费用 / 故障转移数 |
 | `/admin/api/upstreams` | GET | 上游列表（api_key 脱敏） |
 | `/admin/api/upstreams` | POST | 新增上游 |
@@ -529,7 +533,7 @@ curl http://localhost:8787/v1/chat/completions -H "Authorization: Bearer sk-clie
      -d '{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}' -N
 
 # 管理台
-open http://localhost:8787/admin
+open http://localhost:8787/
 ```
 
 ---
