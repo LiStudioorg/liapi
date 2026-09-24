@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -78,24 +79,60 @@ func (u *Upstream) Matches(model string) bool {
 	return false
 }
 
+// Device is a per-client credential. The plaintext token is shown exactly
+// once at creation; only its SHA-256 hash is stored.
+type Device struct {
+	ID        string `json:"id"`
+	Name      string `json:"name,omitempty"`
+	TokenHash string `json:"token_hash"` // sha256 hex, never the raw token
+	RPM       int    `json:"rpm"`        // per-minute limit, 0 = use global
+	Daily     int    `json:"daily"`      // per-day limit, 0 = use global
+	Disabled  bool   `json:"disabled"`
+	CreatedAt string `json:"created_at,omitempty"`
+	Note      string `json:"note,omitempty"`
+}
+
+// AliasRule rewrites model names by exact match or regex and can force
+// extra parameters onto the outbound body.
+type AliasRule struct {
+	Pattern string         `json:"pattern"`
+	Regex   bool           `json:"regex"`
+	Model   string         `json:"model"`
+	Params  map[string]any `json:"params,omitempty"`
+}
+
 type Config struct {
-	Addr               string            `json:"addr"`
-	BodyLimitBytes     int64             `json:"body_limit_bytes"`
-	Timeout            Duration          `json:"timeout"`
-	StreamTimeout      Duration          `json:"stream_timeout"`
-	MaxIdleConns       int               `json:"max_idle_conns"`
-	LogFile            string            `json:"log_file"`
-	RingSize           int               `json:"ring_size"`
-	ProbeInterval      Duration          `json:"probe_interval"`
-	ProbeTimeout       Duration          `json:"probe_timeout"`
-	ProbeFailThreshold int               `json:"probe_fail_threshold"`
-	SkipUnhealthy      bool              `json:"skip_unhealthy"`
-	AdminToken         string            `json:"admin_token"`
-	ClientTokens       []string          `json:"client_tokens"`
-	RateLimitPerMinute int               `json:"rate_limit_per_minute"`
-	Aliases            map[string]string `json:"aliases"`
-	Prices             map[string]Price  `json:"prices"`
-	Upstreams          []Upstream        `json:"upstreams"`
+	Addr               string              `json:"addr"`
+	BodyLimitBytes     int64               `json:"body_limit_bytes"`
+	Timeout            Duration            `json:"timeout"`
+	StreamTimeout      Duration            `json:"stream_timeout"`
+	StreamIdleTimeout  Duration            `json:"stream_idle_timeout"`
+	MaxIdleConns       int                 `json:"max_idle_conns"`
+	LogFile            string              `json:"log_file"`
+	LogMaxBytes        int64               `json:"log_max_bytes"`
+	RingSize           int                 `json:"ring_size"`
+	ProbeInterval      Duration            `json:"probe_interval"`
+	ProbeTimeout       Duration            `json:"probe_timeout"`
+	ProbeFailThreshold int                 `json:"probe_fail_threshold"`
+	ProbeConcurrency   int                 `json:"probe_concurrency"`
+	HealthStateFile    string              `json:"health_state_file"`
+	SkipUnhealthy      bool                `json:"skip_unhealthy"`
+	AdminToken         string              `json:"admin_token"`
+	AdminRatePerMinute int                 `json:"admin_rate_per_minute"`
+	AdminAllowIPs      []string            `json:"admin_allow_ips"`
+	MetricsToken       string              `json:"metrics_token"`
+	ClientTokens       []string            `json:"client_tokens"`
+	RateLimitPerMinute int                 `json:"rate_limit_per_minute"`
+	DailyPerToken      int                 `json:"daily_per_token"`
+	TokenQuotas        map[string]int      `json:"token_quotas"`
+	Aliases            map[string]string   `json:"aliases"`
+	AliasRules         []AliasRule         `json:"alias_rules"`
+	Prices             map[string]Price    `json:"prices"`
+	RouteStrategy      string              `json:"route_strategy"` // "" | latency | cost
+	Fallbacks          map[string][]string `json:"fallbacks"`      // model -> ordered upstream names
+	RetryOnTimeout     bool                `json:"retry_on_timeout"`
+	Upstreams          []Upstream          `json:"upstreams"`
+	Devices            []Device            `json:"devices"`
 }
 
 func (c *Config) SetDefaults() {
@@ -114,6 +151,9 @@ func (c *Config) SetDefaults() {
 	if c.LogFile == "" {
 		c.LogFile = "relay.jsonl"
 	}
+	if c.LogMaxBytes <= 0 {
+		c.LogMaxBytes = 100 << 20
+	}
 	if c.RingSize < 100 {
 		c.RingSize = 800
 	}
@@ -126,6 +166,18 @@ func (c *Config) SetDefaults() {
 	if c.ProbeFailThreshold <= 0 {
 		c.ProbeFailThreshold = 3
 	}
+	if c.ProbeConcurrency <= 0 {
+		c.ProbeConcurrency = 8
+	}
+	if c.HealthStateFile == "" {
+		c.HealthStateFile = "health_state.json"
+	}
+	if c.AdminRatePerMinute == 0 {
+		c.AdminRatePerMinute = 60 // 0 = unset → default; -1 = explicitly disabled
+	}
+	if c.StreamIdleTimeout.Duration == 0 {
+		c.StreamIdleTimeout.Duration = 10 * time.Minute
+	}
 }
 
 func (c *Config) Validate() error {
@@ -134,8 +186,14 @@ func (c *Config) Validate() error {
 		u.Name = strings.TrimSpace(u.Name)
 		u.BaseURL = strings.TrimRight(strings.TrimSpace(u.BaseURL), "/")
 		u.HealthPath = strings.TrimSpace(u.HealthPath)
-		if u.Weight <= 0 {
+		if u.Weight < 0 {
+			return fmt.Errorf("upstream %q: weight must be >= 0", u.Name)
+		}
+		if u.Weight == 0 {
 			u.Weight = 1
+		}
+		if u.Retry < 0 || u.Retry > 10 {
+			return fmt.Errorf("upstream %q: retry must be in [0,10]", u.Name)
 		}
 	}
 
@@ -156,6 +214,9 @@ func (c *Config) Validate() error {
 		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
 			return fmt.Errorf("upstream %q: invalid base_url %q", u.Name, u.BaseURL)
 		}
+		if parsed.Scheme != "http" && parsed.Scheme != "https" {
+			return fmt.Errorf("upstream %q: base_url scheme must be http/https", u.Name)
+		}
 		if u.APIKey == "" && !u.Disabled {
 			return fmt.Errorf("upstream %q: api_key is required (or set disabled=true)", u.Name)
 		}
@@ -166,6 +227,76 @@ func (c *Config) Validate() error {
 
 	if c.AdminToken == "" {
 		c.AdminToken = common.RandomToken("adm-")
+	}
+	if c.RateLimitPerMinute < 0 {
+		return errors.New("rate_limit_per_minute must be >= 0")
+	}
+	if c.AdminRatePerMinute < -1 {
+		return errors.New("admin_rate_per_minute must be >= -1 (-1 disables, 0 means default 60)")
+	}
+	if c.DailyPerToken < 0 {
+		return errors.New("daily_per_token must be >= 0")
+	}
+	switch c.RouteStrategy {
+	case "", "priority", "latency", "cost":
+	default:
+		return fmt.Errorf("route_strategy must be priority|latency|cost, got %q", c.RouteStrategy)
+	}
+
+	// Fallback chains reference existing upstreams by name.
+	for model, chain := range c.Fallbacks {
+		if len(chain) == 0 {
+			return fmt.Errorf("fallbacks[%q]: empty chain", model)
+		}
+		seen := map[string]bool{}
+		for _, name := range chain {
+			if !names[name] {
+				return fmt.Errorf("fallbacks[%q]: unknown upstream %q", model, name)
+			}
+			if seen[name] {
+				return fmt.Errorf("fallbacks[%q]: duplicate upstream %q", model, name)
+			}
+			seen[name] = true
+		}
+	}
+
+	// Alias rules: regex must compile, model required.
+	for i, r := range c.AliasRules {
+		if strings.TrimSpace(r.Pattern) == "" {
+			return fmt.Errorf("alias_rules[%d]: pattern is required", i)
+		}
+		if strings.TrimSpace(r.Model) == "" {
+			return fmt.Errorf("alias_rules[%d]: model is required", i)
+		}
+		if r.Regex {
+			if _, err := regexp.Compile(r.Pattern); err != nil {
+				return fmt.Errorf("alias_rules[%d]: invalid regex: %w", i, err)
+			}
+		}
+	}
+
+	// Devices: unique id + hash.
+	devIDs := map[string]bool{}
+	devHash := map[string]bool{}
+	for i := range c.Devices {
+		d := &c.Devices[i]
+		if d.ID == "" {
+			return fmt.Errorf("devices[%d]: id is required", i)
+		}
+		if devIDs[d.ID] {
+			return fmt.Errorf("devices[%d]: duplicate id %q", i, d.ID)
+		}
+		devIDs[d.ID] = true
+		if d.TokenHash == "" {
+			return fmt.Errorf("device %q: token_hash is required", d.ID)
+		}
+		if devHash[d.TokenHash] {
+			return fmt.Errorf("device %q: duplicate token_hash", d.ID)
+		}
+		devHash[d.TokenHash] = true
+		if d.RPM < 0 || d.Daily < 0 {
+			return fmt.Errorf("device %q: rpm/daily must be >= 0", d.ID)
+		}
 	}
 
 	seen := map[string]bool{}
@@ -217,6 +348,9 @@ func Load(path string) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := checkFilePerm(path); err != nil {
+		return nil, err
+	}
 	cfg := &Config{}
 	cfg.SetDefaults()
 	if err := json.Unmarshal(data, cfg); err != nil {
@@ -228,7 +362,24 @@ func Load(path string) (*Config, error) {
 	return cfg, nil
 }
 
+// checkFilePerm refuses world/group-readable configs (they hold API keys).
+// Windows has no POSIX bits; skip there. Set LIAPI_SKIP_PERM_CHECK=1 to bypass.
+func checkFilePerm(path string) error {
+	if os.Getenv("LIAPI_SKIP_PERM_CHECK") == "1" {
+		return nil
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		return nil // best effort; Load already read the file
+	}
+	if fi.Mode().Perm()&0o077 != 0 {
+		return fmt.Errorf("config file %s has mode %#o; must be 0600 (contains secrets). Run: chmod 600 %s", path, fi.Mode().Perm(), path)
+	}
+	return nil
+}
+
 // Save writes the config atomically: temp file in the same dir + rename.
+// The file is forced to 0600.
 func Save(path string, c *Config) error {
 	data, err := json.MarshalIndent(c, "", "  ")
 	if err != nil {
@@ -243,6 +394,7 @@ func Save(path string, c *Config) error {
 		return err
 	}
 	tmpName := tmp.Name()
+	_ = tmp.Chmod(0o600)
 	if _, err := tmp.Write(data); err != nil {
 		tmp.Close()
 		os.Remove(tmpName)
@@ -257,5 +409,11 @@ func Save(path string, c *Config) error {
 		os.Remove(tmpName)
 		return err
 	}
-	return os.Rename(tmpName, path)
+	if err := os.Rename(tmpName, path); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
+	// Rename may land with temp defaults on some FS; enforce after rename.
+	_ = os.Chmod(path, 0o600)
+	return nil
 }

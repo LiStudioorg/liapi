@@ -1,0 +1,20 @@
+services:
+  liapi:
+    build: .
+    image: liapi:latest
+    container_name: liapi
+    restart: unless-stopped
+    ports:
+      - "8787:8787"
+    volumes:
+      # config.json (0600) + relay.jsonl + health_state.json persist here
+      - ./data:/data
+    environment:
+      # Uncomment only to bypass the 0600 config permission check (not recommended):
+      # LIAPI_SKIP_PERM_CHECK: "1"
+      TZ: Asia/Shanghai
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8787/admin"]
+      interval: 30s
+      timeout: 5s
+      retries: 3

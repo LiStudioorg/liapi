@@ -60,8 +60,11 @@ textarea{resize:vertical;font-family:ui-monospace,Menlo,Consolas,monospace;font-
     <button data-tab="overview" class="active">概览</button>
     <button data-tab="upstreams">上游</button>
     <button data-tab="tokens">令牌</button>
+    <button data-tab="devices">设备</button>
+    <button data-tab="stats">统计</button>
     <button data-tab="logs">日志</button>
     <button data-tab="health">健康</button>
+    <button data-tab="config">配置</button>
     <button data-tab="debug">调试</button>
   </nav>
   <button class="btn sec" id="btnToken">设置 Token</button>
@@ -126,7 +129,7 @@ textarea{resize:vertical;font-family:ui-monospace,Menlo,Consolas,monospace;font-
 
   <section id="tab-tokens" class="tab hidden">
     <div class="card">
-      <h2>客户端令牌</h2>
+      <h2>客户端令牌（明文列表，兼容旧版；新接入推荐用「设备」）</h2>
       <div class="row" style="margin-bottom:16px">
         <input id="newToken" placeholder="输入新 token (如 sk-client-xxxx)" style="max-width:360px">
         <button class="btn" id="btnAddToken">添加</button>
@@ -136,6 +139,77 @@ textarea{resize:vertical;font-family:ui-monospace,Menlo,Consolas,monospace;font-
         <tbody id="tokenRows"></tbody>
       </table>
       <div class="empty hidden" id="tokenEmpty">还没有客户端令牌。</div>
+    </div>
+  </section>
+
+  <section id="tab-devices" class="tab hidden">
+    <div class="card">
+      <div class="toolbar">
+        <h2 style="margin:0">设备（Token 仅存 SHA-256 哈希，明文只显示一次）</h2>
+        <div class="spacer"></div>
+        <button class="btn" id="btnNewDevice">新建设备</button>
+      </div>
+      <div class="form-grid hidden" id="devForm" style="margin-bottom:16px">
+        <div>
+          <label>id (留空自动生成)</label>
+          <input id="devId" placeholder="phone-01">
+          <label>名称</label>
+          <input id="devName" placeholder="我的手机">
+          <label>备注</label>
+          <input id="devNote">
+        </div>
+        <div>
+          <label>RPM（0=用全局）</label>
+          <input id="devRPM" type="number" value="0" min="0">
+          <label>每日上限（0=用全局）</label>
+          <input id="devDaily" type="number" value="0" min="0">
+          <div class="checkbox-row">
+            <input type="checkbox" id="devDisabled"><span>disabled</span>
+          </div>
+        </div>
+      </div>
+      <div class="row" style="margin-bottom:16px" id="devFormActions">
+        <button class="btn" id="btnSaveDev" style="display:none">创建</button>
+        <button class="btn sec" id="btnCancelDev" style="display:none">取消</button>
+      </div>
+      <pre id="devTokenOut" class="hidden"></pre>
+      <table>
+        <thead><tr><th>id</th><th>名称</th><th>rpm</th><th>daily</th><th>token</th><th>状态</th><th></th></tr></thead>
+        <tbody id="devRows"></tbody>
+      </table>
+      <div class="empty hidden" id="devEmpty">还没有设备，点「新建设备」签发 token。</div>
+    </div>
+  </section>
+
+  <section id="tab-stats" class="tab hidden">
+    <div class="card">
+      <div class="toolbar">
+        <h2 style="margin:0">用量统计</h2>
+        <div class="spacer"></div>
+        <select id="statsGroup" style="width:140px">
+          <option value="model">按模型</option>
+          <option value="device">按设备</option>
+          <option value="day">按天</option>
+        </select>
+        <input id="statsFrom" type="date" style="width:160px">
+        <input id="statsTo" type="date" style="width:160px">
+        <button class="btn sec small" id="btnStatsRefresh">查询</button>
+        <button class="btn sec small" id="btnStatsCsv">导出CSV</button>
+        <button class="btn sec small" id="btnStatsJson">导出JSON</button>
+      </div>
+      <div class="grid" id="statsTotals" style="margin-bottom:16px"></div>
+      <table>
+        <thead><tr><th>key</th><th>请求</th><th>成功</th><th>错误</th><th>in/out</th><th>费用</th><th>avg</th><th>P50</th><th>P90</th><th>P99</th></tr></thead>
+        <tbody id="statsRows"></tbody>
+      </table>
+      <div class="empty hidden" id="statsEmpty">所选区间暂无数据。</div>
+      <h2 style="margin-top:20px">设备排行</h2>
+      <table>
+        <thead><tr><th>设备/token</th><th>请求</th><th>in/out</th><th>费用</th></tr></thead>
+        <tbody id="devRankRows"></tbody>
+      </table>
+      <h2 style="margin-top:20px">错误码分布</h2>
+      <div class="grid" id="errGrid"></div>
     </div>
   </section>
 
@@ -162,6 +236,30 @@ textarea{resize:vertical;font-family:ui-monospace,Menlo,Consolas,monospace;font-
         <tbody id="healthRows"></tbody>
       </table>
       <div class="empty hidden" id="healthEmpty">没有启用的上游。</div>
+    </div>
+  </section>
+
+  <section id="tab-config" class="tab hidden">
+    <div class="card">
+      <div class="toolbar">
+        <h2 style="margin:0">配置（在线编辑 + 热重载 / 导入导出）</h2>
+        <div class="spacer"></div>
+        <button class="btn sec small" id="btnCfgLoad">重新加载</button>
+        <button class="btn sec small" id="btnCfgSave">保存并热重载</button>
+        <button class="btn sec small" id="btnCfgExport">导出 JSON</button>
+        <label class="btn sec small" style="cursor:pointer">
+          导入 JSON<input type="file" id="cfgFile" accept=".json,application/json" class="hidden">
+        </label>
+        <label class="btn sec small" style="cursor:pointer">
+          导入 OneAPI<input type="file" id="oneapiFile" accept=".json,application/json" class="hidden">
+        </label>
+      </div>
+      <p class="muted" style="font-size:12px;margin-top:0">
+        「重新加载」拉取的配置中密钥已脱敏；保存时脱敏值会自动还原为原密钥。
+        「导出 JSON」包含完整密钥（含 admin_token / api_key），请妥善保管。
+        OneAPI 导入仅替换 upstreams 列表，其余配置保持不变。
+      </p>
+      <textarea id="cfgText" style="min-height:420px;width:100%"></textarea>
     </div>
   </section>
 
@@ -255,8 +353,11 @@ function refreshTab(tab, force){
     overview: loadOverview,
     upstreams: loadUpstreams,
     tokens: loadTokens,
+    devices: loadDevices,
+    stats: loadStats,
     logs: loadLogs,
     health: loadHealth,
+    config: loadConfigText,
     debug: loadModelList,
   };
   if (map[tab]) map[tab](force);
@@ -272,11 +373,14 @@ async function loadOverview(force){
       ['平均延迟', d.avg_latency_ms + ' ms'],
       ['in_token', fmtNum(d.in_tokens)],
       ['out_token', fmtNum(d.out_tokens)],
-      ['费用(元)', d.cost.toFixed(4)],
+      ['费用(元)', (d.cost||0).toFixed(4)],
+      ['今日费用', (d.cost_today||0).toFixed(4)],
       ['客户端错误', d.client_errors],
       ['上游错误', d.upstream_errors],
+      ['故障转移', d.failovers||0],
       ['上游数', d.upstreams],
       ['客户端token', d.client_tokens],
+      ['设备数', d.devices||0],
       ['模型数', d.models],
     ];
     document.getElementById('statGrid').innerHTML = items.map(([k,v])=>
@@ -430,6 +534,200 @@ window.deleteToken = async function(full){
     loadTokens();
   } catch(e){ toast(e.message); }
 };
+
+// ---------- devices ----------
+async function loadDevices(){
+  const tbody = document.getElementById('devRows');
+  const empty = document.getElementById('devEmpty');
+  try {
+    const list = await api('/devices');
+    tbody.innerHTML = list.map((d)=>
+      '<tr>' +
+        '<td><code>'+esc(d.id)+'</code></td>' +
+        '<td>'+esc(d.name||'')+'</td>' +
+        '<td>'+(d.rpm>0?d.rpm:'全局')+'</td>' +
+        '<td>'+(d.daily>0?d.daily:'全局')+'</td>' +
+        '<td><span class="muted">'+esc(d.token_hint||'')+'</span></td>' +
+        '<td>'+(d.disabled?'<span class="badge gray">disabled</span>':'<span class="badge ok">启用</span>')+'</td>' +
+        '<td class="row" style="gap:6px">' +
+          '<button class="btn sec small" onclick="rotateDevice(\''+escapeJs(d.id)+'\')">换钥</button>' +
+          '<button class="danger small" onclick="deleteDevice(\''+escapeJs(d.id)+'\')">删</button>' +
+        '</td>' +
+      '</tr>'
+    ).join('');
+    empty.classList.toggle('hidden', list.length > 0);
+  } catch(e){ toast(e.message); }
+}
+function showDevForm(show){
+  document.getElementById('devForm').classList.toggle('hidden', !show);
+  document.getElementById('btnSaveDev').style.display = show ? '' : 'none';
+  document.getElementById('btnCancelDev').style.display = show ? '' : 'none';
+}
+document.getElementById('btnNewDevice').addEventListener('click', ()=>{
+  ['devId','devName','devNote'].forEach(id=>document.getElementById(id).value='');
+  document.getElementById('devRPM').value = 0;
+  document.getElementById('devDaily').value = 0;
+  document.getElementById('devDisabled').checked = false;
+  document.getElementById('devTokenOut').classList.add('hidden');
+  showDevForm(true);
+});
+document.getElementById('btnCancelDev').addEventListener('click', ()=>showDevForm(false));
+document.getElementById('btnSaveDev').addEventListener('click', async ()=>{
+  const body = {
+    id: document.getElementById('devId').value.trim(),
+    name: document.getElementById('devName').value.trim(),
+    note: document.getElementById('devNote').value.trim(),
+    rpm: Number(document.getElementById('devRPM').value)||0,
+    daily: Number(document.getElementById('devDaily').value)||0,
+    disabled: document.getElementById('devDisabled').checked,
+  };
+  try {
+    const d = await api('/devices', {method:'POST', body: JSON.stringify(body)});
+    showDevForm(false);
+    if (d.token){
+      const out = document.getElementById('devTokenOut');
+      out.classList.remove('hidden');
+      out.textContent = '⚠ 此 token 只显示一次，请立即保存：\n\n' + d.token;
+    }
+    toast('设备已创建');
+    loadDevices();
+  } catch(e){ toast(e.message); }
+});
+window.rotateDevice = async function(id){
+  if (!confirm('轮换 ' + id + ' 的 token？旧 token 立即失效。')) return;
+  try {
+    const d = await api('/devices/' + encodeURIComponent(id) + '/rotate', {method:'POST', body:'{}'});
+    if (d.token){
+      const out = document.getElementById('devTokenOut');
+      out.classList.remove('hidden');
+      out.textContent = '⚠ 新 token 只显示一次，请立即保存：\n\n' + d.token;
+    }
+    toast('已轮换');
+    loadDevices();
+  } catch(e){ toast(e.message); }
+};
+window.deleteDevice = async function(id){
+  if (!confirm('删除设备 ' + id + ' ?')) return;
+  try {
+    await api('/devices/' + encodeURIComponent(id), {method:'DELETE'});
+    toast('已删除');
+    loadDevices();
+  } catch(e){ toast(e.message); }
+};
+
+// ---------- stats ----------
+async function loadStats(){
+  const g = document.getElementById('statsGroup').value;
+  const from = document.getElementById('statsFrom').value;
+  const to = document.getElementById('statsTo').value;
+  let qs = 'group_by=' + encodeURIComponent(g);
+  if (from) qs += '&from=' + from;
+  if (to) qs += '&to=' + to;
+  try {
+    const snap = await api('/stats?' + qs);
+    const t = snap.total || {};
+    document.getElementById('statsTotals').innerHTML = [
+      ['总请求', t.requests||0],
+      ['成功', t.success||0],
+      ['错误', t.errors||0],
+      ['费用(元)', (t.cost||0).toFixed(4)],
+      ['P50', (t.p50_ms||0)+'ms'],
+      ['P90', (t.p90_ms||0)+'ms'],
+      ['P99', (t.p99_ms||0)+'ms'],
+    ].map(([k,v])=>'<div class="stat"><div class="k">'+esc(k)+'</div><div class="v">'+esc(v)+'</div></div>').join('');
+
+    const rows = snap.rows || [];
+    document.getElementById('statsRows').innerHTML = rows.map(r=>
+      '<tr><td>'+esc(r.key)+'</td><td>'+r.requests+'</td><td>'+r.success+'</td><td>'+r.errors+'</td>' +
+      '<td>'+fmtNum(r.in_tokens)+'/'+fmtNum(r.out_tokens)+'</td><td>'+(r.cost||0).toFixed(4)+'</td>' +
+      '<td>'+r.avg_latency_ms+'</td><td>'+r.p50_ms+'</td><td>'+r.p90_ms+'</td><td>'+r.p99_ms+'</td></tr>'
+    ).join('');
+    document.getElementById('statsEmpty').classList.toggle('hidden', rows.length>0);
+
+    const errs = snap.error_codes || {};
+    document.getElementById('errGrid').innerHTML = Object.keys(errs).sort().map(code=>
+      '<div class="stat"><div class="k">HTTP '+esc(code)+'</div><div class="v">'+errs[code]+'</div></div>'
+    ).join('') || '<div class="muted">无错误</div>';
+
+    const top = await api('/stats/devices?n=10');
+    document.getElementById('devRankRows').innerHTML = (top||[]).map(r=>
+      '<tr><td>'+esc(r.key)+'</td><td>'+r.requests+'</td>' +
+      '<td>'+fmtNum(r.in_tokens)+'/'+fmtNum(r.out_tokens)+'</td><td>'+(r.cost||0).toFixed(4)+'</td></tr>'
+    ).join('');
+  } catch(e){ toast(e.message); }
+}
+document.getElementById('btnStatsRefresh').addEventListener('click', loadStats);
+document.getElementById('statsGroup').addEventListener('change', loadStats);
+document.getElementById('btnStatsCsv').addEventListener('click', ()=>downloadAuth('/admin/api/stats/export?' + statsQS('csv')));
+document.getElementById('btnStatsJson').addEventListener('click', ()=>downloadAuth('/admin/api/stats/export?' + statsQS('json')));
+function statsQS(fmt){
+  const g = document.getElementById('statsGroup').value;
+  const from = document.getElementById('statsFrom').value;
+  const to = document.getElementById('statsTo').value;
+  let qs = 'format=' + fmt + '&group_by=' + encodeURIComponent(g);
+  if (from) qs += '&from=' + from;
+  if (to) qs += '&to=' + to;
+  return qs;
+}
+async function downloadAuth(url){
+  try {
+    const res = await fetch(url, {headers: TOKEN ? {Authorization:'Bearer '+TOKEN} : {}});
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const blob = await res.blob();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = url.includes('csv') ? 'liapi-stats.csv' : 'liapi-stats.json';
+    a.click();
+    URL.revokeObjectURL(a.href);
+  } catch(e){ toast(e.message); }
+}
+
+// ---------- config editor ----------
+async function loadConfigText(){
+  try {
+    const res = await fetch('/admin/api/config', {headers: TOKEN ? {Authorization:'Bearer '+TOKEN} : {}});
+    if (res.status === 401){ askToken(); return; }
+    const text = await res.text();
+    let obj; try { obj = JSON.parse(text); } catch(e){ document.getElementById('cfgText').value = text; return; }
+    document.getElementById('cfgText').value = JSON.stringify(obj, null, 2);
+  } catch(e){ toast(e.message); }
+}
+document.getElementById('btnCfgLoad').addEventListener('click', loadConfigText);
+document.getElementById('btnCfgSave').addEventListener('click', async ()=>{
+  const text = document.getElementById('cfgText').value;
+  try { JSON.parse(text); } catch(e){ toast('不是合法 JSON: ' + e.message); return; }
+  if (!confirm('保存并热重载配置？校验失败将保留当前配置。')) return;
+  try {
+    await api('/config', {method:'POST', body: text});
+    toast('已保存并热重载');
+    loadConfigText();
+  } catch(e){ toast(e.message); }
+});
+document.getElementById('btnCfgExport').addEventListener('click', ()=>downloadAuth('/admin/api/config/export'));
+document.getElementById('cfgFile').addEventListener('change', async (e)=>{
+  const f = e.target.files[0];
+  if (!f) return;
+  const text = await f.text();
+  if (!confirm('导入并覆盖全部配置？当前配置将被替换（校验失败则不替换）。')) { e.target.value=''; return; }
+  try {
+    await api('/config/import', {method:'POST', body: text});
+    toast('导入成功');
+    loadConfigText();
+  } catch(err){ toast(err.message); }
+  e.target.value = '';
+});
+document.getElementById('oneapiFile').addEventListener('change', async (e)=>{
+  const f = e.target.files[0];
+  if (!f) return;
+  const text = await f.text();
+  if (!confirm('从 OneAPI 导入？仅替换 upstreams，其余配置保持不变。')) { e.target.value=''; return; }
+  try {
+    await api('/config/import?format=oneapi', {method:'POST', body: text});
+    toast('OneAPI 上游已导入');
+    loadConfigText();
+  } catch(err){ toast(err.message); }
+  e.target.value = '';
+});
 
 // ---------- logs ----------
 async function loadLogs(force){

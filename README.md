@@ -1,5 +1,11 @@
 # Liapi — OpenAI 兼容 API 中转站
 
+[![CI](https://github.com/LiStudioorg/liapi/actions/workflows/ci.yml/badge.svg)](https://github.com/LiStudioorg/liapi/actions/workflows/ci.yml)
+[![Release](https://github.com/LiStudioorg/liapi/actions/workflows/release.yml/badge.svg)](https://github.com/LiStudioorg/liapi/actions/workflows/release.yml)
+[![Go Report Card](https://goreportcard.com/badge/github.com/LiStudioorg/liapi)](https://goreportcard.com/report/github.com/LiStudioorg/liapi)
+[![Go Version](https://img.shields.io/github/go-mod/go-version/LiStudioorg/liapi)](https://go.dev)
+[![License](https://img.shields.io/github/license/LiStudioorg/liapi)](LICENSE)
+
 > 按 P0 → P1 → P2 顺序实现。P0 完成即可作为可用的中转站使用。
 
 ---
@@ -113,27 +119,56 @@ liapi/
   "addr": ":8787",                        // 监听地址
   "body_limit_bytes": 16777216,           // 请求体上限，默认 16MB
   "timeout": 300,                         // 非流式转发超时（秒），0=关闭
-  "stream_timeout": 0,                    // 流式超时（秒），0=不设
+  "stream_timeout": 0,                    // 流式整体超时（秒），0=不设
+  "stream_idle_timeout": 600,             // 流式空闲看门狗（秒），0=关闭，默认 600
   "max_idle_conns": 100,                  // 连接复用池
-  "log_file": "relay.jsonl",              // JSONL 日志文件
+  "log_file": "relay.jsonl",              // JSONL 日志文件（0600）
+  "log_max_bytes": 104857600,             // 日志轮转阈值（默认 100MB，超限切到 .1）
   "ring_size": 800,                       // 内存环形缓冲条数
   "probe_interval": 30,                   // 健康检查间隔（秒）
   "probe_fail_threshold": 3,              // 连续失败 N 次才判不健康
+  "probe_concurrency": 8,                 // 健康探测最大并发（默认 8）
+  "health_state_file": "health_state.json", // 健康状态持久化文件
   "skip_unhealthy": true,                 // 路由时避开不健康上游（可开关）
 
   "admin_token": "adm-sk-xxxxxxxx",       // 管理接口鉴权（独立）
-  "client_tokens": ["sk-client-aaa", ...],// 合法的客户端 token 数组
+  "admin_rate_per_minute": 60,            // 管理接口按 IP 限流（-1=关闭，0/未设=默认60）
+  "admin_allow_ips": [],                  // 管理接口 IP/CIDR 白名单，空=不限
+  "metrics_token": "",                    // /metrics 鉴权 token；"-"=内网免鉴权；
+                                          // 空=回退 admin token
+  "client_tokens": ["sk-client-aaa"],      // 旧式明文客户端 token（兼容保留）
 
-  "rate_limit_per_minute": 0,             // 每 token 每分钟请求数，0=关闭
+  "rate_limit_per_minute": 0,             // 每 token 每分钟请求数（滑动窗口），0=关闭
+  "daily_per_token": 0,                   // 每 token 每日（UTC）请求数，0=关闭
+  "token_quotas": {},                     // 预留：按 token 覆盖配额
 
-  "aliases": {                            // (P2) 模型别名
-    "gpt-4o": "openai/gpt-4o"
+  "retry_on_timeout": false,              // 超时是否允许重试/切换（默认 false，防重复计费）
+  "route_strategy": "priority",           // priority(默认加权随机) | latency | cost
+  "fallbacks": {                          // 显式降级链：模型 → 有序上游名
+    "gpt-4o": ["openai-main", "openrouter-fallback"]
   },
 
-  "prices": {                             // (P2) 费用估算，元/1M tokens
+  "aliases": {                            // 精确模型别名
+    "gpt-4o": "openai/gpt-4o"
+  },
+  "alias_rules": [                        // 别名规则（正则 + 参数覆写）
+    { "pattern": "^gpt-4o-mini$", "regex": true,
+      "model": "openai/gpt-4o-mini",
+      "params": { "temperature": 0.2 } }
+  ],
+
+  "prices": {                             // 费用估算，元/1M tokens
     "gpt-4o":        { "input": 20,  "output": 60  },
     "claude-3-5-sonnet": { "input": 20, "output": 100 }
   },
+
+  "devices": [                            // 设备：token 只存 SHA-256，明文仅签发一次
+    { "id": "phone-01", "name": "我的手机",
+      "token_hash": "…sha256 hex…",
+      "rpm": 30,                          // 0=用全局 rate_limit_per_minute
+      "daily": 500,                       // 0=用全局 daily_per_token
+      "disabled": false, "created_at": "2026-09-23T00:00:00Z" }
+  ],
 
   "upstreams": [
     {
@@ -173,20 +208,40 @@ liapi/
 }
 ```
 
-### 字段说明
+### 字段说明（upstream）
 
 | 字段 | 必填 | 说明 |
 |---|---|---|
-| `name` | ✅ | 唯一标识，日志/健康检查用 |
-| `base_url` | ✅ | **带版本前缀**（如 `…/v1`），不带尾斜杠 |
+| `name` | ✅ | 唯一标识，日志/健康检查/降级链引用 |
+| `base_url` | ✅ | **带版本前缀**（如 `…/v1`），不带尾斜杠，仅 http/https |
 | `api_key` | ✅ | 上游密钥，仅出站注入 |
 | `models` | ✅ | 支持的模型列表，`"*"` 兜底 |
 | `priority` | 建议 | 越小越优先 |
-| `weight` | 可选 | 同优先级内加权随机，默认 1 |
+| `weight` | 可选 | 同优先级内加权随机，默认 1（负数报错） |
 | `disabled` | 可选 | 临时停用 |
 | `health_path` | 可选 | 健康检查路径，默认 `/v1/models` |
-| `retry` | 可选 | 单上游内部重试次数 |
+| `retry` | 可选 | 单上游内部重试次数（0–10） |
 | `inject_usage` | 可选 | 流式时写入 `stream_options: {include_usage:true}` |
+
+### 字段说明（顶层关键项）
+
+| 字段 | 说明 |
+|---|---|
+| `admin_rate_per_minute` | 管理 API 每 IP 每分钟请求数（防暴力破解）；`-1`=关闭，`0`/未设=默认 60 |
+| `admin_allow_ips` | 管理 API IP/CIDR 白名单；同时用于是否信任 `X-Forwarded-For` |
+| `metrics_token` | `/metrics` 鉴权；`"-"`=免鉴权；未设置=要求 admin token |
+| `rate_limit_per_minute` | 客户端**滑动窗口**限流（窗口边界不再出现突发翻倍） |
+| `daily_per_token` | 每日（UTC）请求配额，0=关闭；设备可用 `daily` 覆盖 |
+| `probe_concurrency` | 健康探测并发上限（默认 8），防止上游过多时连接风暴 |
+| `log_max_bytes` | 日志按大小轮转（默认 100MB → `relay.jsonl.1`） |
+| `stream_idle_timeout` | 流式空闲看门狗：上游/客户端均无数据超时则断开（默认 600s） |
+| `retry_on_timeout` | 超时是否重试/故障转移；默认 `false`（POST 已可能入账，防重复计费） |
+| `route_strategy` | `priority`（默认加权随机）/ `latency`（按探测延迟反比加权）/ `cost`（按 `prices` 价目） |
+| `fallbacks` | 显式降级链：`{"模型": ["上游A","上游B"]}`，顺序严格优先于 priority/weight |
+| `alias_rules` | 正则别名 + 强制参数覆写（`params` 最后合并，覆盖客户端同名字段） |
+| `devices` | 设备 token：只存 SHA-256 `token_hash`，明文仅创建/轮换时返回一次 |
+
+**配置文件权限**：`config.json` 含密钥，必须 `chmod 600`。liapi 启动时校验文件权限（Windows 跳过；`LIAPI_SKIP_PERM_CHECK=1` 仅限恢复场景）。`Save` 始终写 0600。
 
 > **为什么 `base_url` 带 `/v1`**：不同厂商前缀不一致（OpenAI `/v1`、Anthropic `/v1`、部分自定义网关无前缀）。统一规则：客户端路径去 `/v1` 前缀 + 上游 `base_url` 拼接，路径全部由一个规则产生，可预测、可 debug。
 
@@ -300,25 +355,51 @@ return failAll(lastErr)                       # 502 或透传最后一次的 sta
 { "error": { "message": "...", "type": "...", "code": "..." } }
 ```
 
-- `413` 请求体超限；`400` 非法 JSON / 缺 model；`401` 鉴权失败；`429` 限流；`502` 无上游匹配或全部失败。
+- `413` 请求体超限；`400` 非法 JSON / 缺 model；`401` 鉴权失败；`429` 限流/日配额；`502` 无上游匹配或全部失败；`504` 上游超时（且 `retry_on_timeout=false`）；`499` 客户端断开（仅日志）。
+- 每个响应携带 `X-Request-ID`（客户端可自带；同时转发给上游并写入日志 `request_id` 字段），用于全链路追踪。
 
 ### 7.2 管理 API（独立 admin token）
 
+除列表/查看外，管理 API 受 **IP 白名单 + 每 IP 限流（默认 60/min）+ admin token** 三层保护。
+
 | 路径 | 方法 | 说明 |
 |---|---|---|
-| `/admin` | GET | 管理台单页（go:embed） |
-| `/admin/api/overview` | GET | 请求数 / 成功率 / 平均延迟 / token 量 / 费用 |
+| `/admin` | GET | 管理台单页（go:embed，含设备/统计/配置编辑） |
+| `/admin/api/overview` | GET | 请求数 / 成功率 / 平均延迟 / token 量 / 费用 / 故障转移数 |
 | `/admin/api/upstreams` | GET | 上游列表（api_key 脱敏） |
 | `/admin/api/upstreams` | POST | 新增上游 |
 | `/admin/api/upstreams/{name}` | PUT | 更新上游（api_key 留空=保持原值） |
 | `/admin/api/upstreams/{name}` | DELETE | 删除上游 |
-| `/admin/api/tokens` | GET/POST | 列出 / 新增客户端 token |
+| `/admin/api/tokens` | GET/POST | 列出 / 新增客户端 token（旧式明文，兼容保留） |
 | `/admin/api/tokens/delete` | POST | 删除 token（传全文） |
-| `/admin/api/logs?n=` | GET | 最近 N 条日志 |
-| `/admin/api/health` | GET | 上游健康状态 |
+| `/admin/api/devices` | GET | 设备列表（只回 token 前缀提示，不回哈希全文） |
+| `/admin/api/devices` | POST | 新建设备 → **明文 token 只返回一次**（仅存 SHA-256） |
+| `/admin/api/devices/{id}` | PUT | 改 name/rpm/daily/note/disabled |
+| `/admin/api/devices/{id}/rotate` | POST | 轮换 token（旧的立即失效，新的只返回一次） |
+| `/admin/api/devices/{id}` | DELETE | 删除设备 |
+| `/admin/api/logs?n=` | GET | 最近 N 条日志（含 request_id / device） |
+| `/admin/api/health` | GET | 上游健康状态（重启后从 `health_state_file` 恢复） |
 | `/admin/api/test` | POST | 调试：{model, messages, stream} 直接发一条 |
+| `/admin/api/config` | GET | 当前配置（**密钥脱敏**，可直接回存：含 `...` 的值自动还原） |
+| `/admin/api/config` | POST | 整份替换并热重载（校验失败保留旧配置） |
+| `/admin/api/config/export` | GET | 导出完整 JSON（**含明文密钥**，备份用） |
+| `/admin/api/config/import?format=liapi\|oneapi` | POST | 导入原生配置，或 OneAPI channels（仅替换 upstreams） |
+| `/admin/api/stats?from=&to=&group_by=day\|model\|device` | GET | 聚合统计：请求数/费用/P50/P90/P99/错误码分布 |
+| `/admin/api/stats/export?format=csv\|json&…` | GET | 统计导出 |
+| `/admin/api/stats/devices?n=` | GET | 设备用量排行 |
+| `/metrics` | GET | Prometheus 文本格式；`metrics_token`（`"-"`=免鉴权）或 admin token |
 
 管理台前端把 admin token 存 `localStorage`，每次请求带 `Authorization: Bearer <admin_token>`。**管理 token 与客户端 token 严格分离**。
+
+### 7.3 部署（Docker）
+
+```bash
+mkdir -p data && umask 077
+# 准备 data/config.json（或首次启动后 Ctrl+C 再编辑，注意 chmod 600）
+docker compose up -d --build
+# 或
+docker build -t liapi . && docker run -p 8787:8787 -v "$PWD/data:/data" liapi
+```
 
 ---
 

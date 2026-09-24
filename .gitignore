@@ -1,3 +1,6 @@
 /liapi
 *.log
 /config.json
+/health_state.json
+/pid.txt
+/relay.jsonl

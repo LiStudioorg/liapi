@@ -2,9 +2,12 @@ package stats
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sort"
 	"sync"
 	"time"
@@ -24,16 +27,27 @@ type HealthStatus struct {
 
 // Health background-probes enabled upstreams and stores results in memory.
 // An upstream is only marked unhealthy after probe_fail_threshold
-// consecutive failures (avoids flapping).
+// consecutive failures (avoids flapping). Results are persisted (atomic
+// temp+rename) so restarts do not lose the last known state.
 type Health struct {
 	holder *config.Holder
 	client *http.Client
 	mu     sync.RWMutex
 	states map[string]*HealthStatus
+
+	saveMu   sync.Mutex
+	savePath string
 }
 
 func NewHealth(holder *config.Holder, client *http.Client) *Health {
-	return &Health{holder: holder, client: client, states: make(map[string]*HealthStatus)}
+	h := &Health{
+		holder:   holder,
+		client:   client,
+		states:   make(map[string]*HealthStatus),
+		savePath: holder.Get().HealthStateFile,
+	}
+	h.load()
+	return h
 }
 
 func (h *Health) Start(ctx context.Context) {
@@ -75,6 +89,17 @@ func (h *Health) IsHealthy(name string) bool {
 	return true
 }
 
+// LatencyMS returns the last probe latency (0 if unknown) for latency-aware
+// routing.
+func (h *Health) LatencyMS(name string) int64 {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	if s := h.states[name]; s != nil && s.OK {
+		return s.LatencyMS
+	}
+	return 0
+}
+
 func (h *Health) All() []HealthStatus {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
@@ -96,7 +121,12 @@ func (h *Health) probeAll() {
 	if threshold <= 0 {
 		threshold = 3
 	}
+	maxConc := cfg.ProbeConcurrency
+	if maxConc <= 0 {
+		maxConc = 8
+	}
 
+	sem := make(chan struct{}, maxConc)
 	var wg sync.WaitGroup
 	for i := range cfg.Upstreams {
 		up := &cfg.Upstreams[i]
@@ -106,6 +136,8 @@ func (h *Health) probeAll() {
 		wg.Add(1)
 		go func(u *config.Upstream) {
 			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
 			raw := h.probe(u, timeout)
 			st := HealthStatus{
 				Name:      u.Name,
@@ -125,6 +157,7 @@ func (h *Health) probeAll() {
 		}(up)
 	}
 	wg.Wait()
+	h.save()
 }
 
 func (h *Health) probe(u *config.Upstream, timeout time.Duration) *HealthStatus {
@@ -171,4 +204,67 @@ func (h *Health) set(name string, st *HealthStatus) {
 	h.mu.Lock()
 	h.states[name] = st
 	h.mu.Unlock()
+}
+
+// persistShape is the on-disk format for health_state_file.
+type persistShape struct {
+	SavedAt string                  `json:"saved_at"`
+	States  map[string]HealthStatus `json:"states"`
+}
+
+func (h *Health) load() {
+	path := h.savePath
+	if path == "" {
+		return
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	var p persistShape
+	if err := json.Unmarshal(data, &p); err != nil || p.States == nil {
+		return
+	}
+	h.mu.Lock()
+	for k, v := range p.States {
+		st := v
+		st.Name = k
+		h.states[k] = &st
+	}
+	h.mu.Unlock()
+}
+
+func (h *Health) save() {
+	path := h.savePath
+	if path == "" {
+		return
+	}
+	h.saveMu.Lock()
+	defer h.saveMu.Unlock()
+
+	h.mu.RLock()
+	p := persistShape{SavedAt: time.Now().Format(time.RFC3339), States: make(map[string]HealthStatus, len(h.states))}
+	for k, v := range h.states {
+		p.States[k] = *v
+	}
+	h.mu.RUnlock()
+
+	data, err := json.MarshalIndent(p, "", "  ")
+	if err != nil {
+		return
+	}
+	dir := filepath.Dir(path)
+	_ = os.MkdirAll(dir, 0o755)
+	tmp, err := os.CreateTemp(dir, ".health-*.tmp")
+	if err != nil {
+		return
+	}
+	tmpName := tmp.Name()
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		return
+	}
+	_ = tmp.Close()
+	_ = os.Rename(tmpName, path)
 }

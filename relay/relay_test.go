@@ -78,17 +78,22 @@ func TestRelativePath(t *testing.T) {
 func TestPrepareBody(t *testing.T) {
 	// No change needed: original bytes preserved.
 	in := []byte(`{"model":"gpt-4o","stream":false}`)
-	if got := prepareBody(in, "gpt-4o", "gpt-4o", false, true); !bytes.Equal(got, in) {
+	if got := prepareBody(in, "gpt-4o", "gpt-4o", false, true, nil); !bytes.Equal(got, in) {
 		t.Fatalf("no-rewrite path should return original body")
 	}
 	// Alias rewrite.
-	out := prepareBody([]byte(`{"model":"gpt-4o","stream":true}`), "gpt-4o", "openai/gpt-4o", true, false)
+	out := prepareBody([]byte(`{"model":"gpt-4o","stream":true}`), "gpt-4o", "openai/gpt-4o", true, false, nil)
 	if !bytes.Contains(out, []byte(`"openai/gpt-4o"`)) {
 		t.Fatalf("model not rewritten: %s", out)
 	}
 	// inject usage.
-	out = prepareBody([]byte(`{"model":"gpt-4o","stream":true}`), "gpt-4o", "gpt-4o", true, true)
+	out = prepareBody([]byte(`{"model":"gpt-4o","stream":true}`), "gpt-4o", "gpt-4o", true, true, nil)
 	if !bytes.Contains(out, []byte(`"include_usage"`)) {
 		t.Fatalf("include_usage not injected: %s", out)
+	}
+	// Parameter overrides win over the original body.
+	out = prepareBody([]byte(`{"model":"gpt-4o","temperature":0.9}`), "gpt-4o", "gpt-4o", false, false, map[string]any{"temperature": 0.1})
+	if !bytes.Contains(out, []byte(`"temperature":0.1`)) {
+		t.Fatalf("param override not applied: %s", out)
 	}
 }

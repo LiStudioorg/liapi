@@ -33,43 +33,75 @@ func (s *Server) handleClaudeMessages(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleModelEndpoint is the shared pipeline for JSON-model endpoints:
-// auth -> rate limit -> body/model parse -> route -> forward (failover)
-// -> copy response -> log.
+// auth -> rate limit -> daily quota -> body/model parse -> route -> forward
+// (failover) -> copy response -> log.
 func (s *Server) handleModelEndpoint(w http.ResponseWriter, r *http.Request, clientPath string) {
 	start := time.Now()
+	reqID := requestIDFrom(r)
+	if reqID == "" {
+		reqID = common.RequestID()
+	}
+	w.Header().Set("X-Request-ID", reqID)
+
 	var (
-		status   int
-		upstream string
-		inTok    int
-		outTok   int
-		streamed bool
-		errMsg   string
-		logModel string
-		logToken string
+		status    int
+		upstream  string
+		inTok     int
+		outTok    int
+		streamed  bool
+		errMsg    string
+		logModel  string
+		logToken  string
+		logDevice string
 	)
 
 	defer func() {
-		s.record(r, logToken, logModel, upstream, status, streamed, start, inTok, outTok, errMsg)
+		s.record(r, reqID, logToken, logDevice, logModel, upstream, status, streamed, start, inTok, outTok, errMsg)
 	}()
 
-	// 1. Auth
-	token := s.clientAuth.Authenticate(r)
-	if token == "" || !s.clientAuth.Valid(token) {
+	// 1. Auth (device hash first, then legacy plaintext list).
+	ident := s.clientAuth.Identify(r)
+	if ident == nil {
 		common.WriteError(w, http.StatusUnauthorized, "invalid or missing API key", "invalid_request_error", "invalid_api_key")
 		status = http.StatusUnauthorized
 		return
 	}
-	logToken = common.MaskToken(token)
+	logToken = ident.Mask()
+	if ident.Device != nil {
+		logDevice = ident.Device.ID
+	}
 
-	// 2. Rate limit
-	if !s.limiter.Allow(token) {
+	cfg := s.holder.Get()
+
+	// 2. Rate limit (per-device RPM override, else global sliding window).
+	limit := cfg.RateLimitPerMinute
+	if ident.Device != nil && ident.Device.RPM > 0 {
+		limit = ident.Device.RPM
+	}
+	if !s.limiter.AllowN(ident.Token, limit) {
+		s.metrics.IncRateLimited()
 		common.WriteError(w, http.StatusTooManyRequests, "rate limit exceeded, try again later", "rate_limit_error", "rate_limit_exceeded")
 		status = http.StatusTooManyRequests
 		return
 	}
 
+	// 2b. Daily quota (per-device daily override, else global).
+	quotaLimit := cfg.DailyPerToken
+	if ident.Device != nil && ident.Device.Daily > 0 {
+		quotaLimit = ident.Device.Daily
+	}
+	quotaKey := logToken
+	if ident.Device != nil {
+		quotaKey = "dev:" + ident.DeviceID
+	}
+	if !s.quota.AllowN(quotaKey, quotaLimit) {
+		s.metrics.IncQuotaExceeded()
+		common.WriteError(w, http.StatusTooManyRequests, "daily quota exceeded, try again tomorrow (UTC)", "rate_limit_error", "daily_quota_exceeded")
+		status = http.StatusTooManyRequests
+		return
+	}
+
 	// 3. Body + model parse
-	cfg := s.holder.Get()
 	body, err := readBody(w, r, cfg.BodyLimitBytes)
 	if err != nil {
 		status = http.StatusBadRequest
@@ -85,7 +117,7 @@ func (s *Server) handleModelEndpoint(w http.ResponseWriter, r *http.Request, cli
 		return
 	}
 	originalModel := model
-	model = s.router.ResolveModel(model)
+	model, params := s.router.ResolveAlias(model)
 	logModel = model
 
 	// 4. Route
@@ -99,7 +131,7 @@ func (s *Server) handleModelEndpoint(w http.ResponseWriter, r *http.Request, cli
 	}
 
 	// 5. Forward with failover
-	result, failure := s.relay.Do(r.Context(), body, clientPath, originalModel, model, candidates)
+	result, failure := s.relay.Do(r.Context(), body, clientPath, originalModel, model, candidates, params, reqID)
 	if failure != nil {
 		if failure.PassResponse != nil {
 			// 4xx (≠429) from upstream: pass its error through verbatim.
@@ -107,6 +139,7 @@ func (s *Server) handleModelEndpoint(w http.ResponseWriter, r *http.Request, cli
 			streamed, inTok, outTok, _ = failure.PassTo(w)
 			status = failure.PassResponse.StatusCode
 			errMsg = fmt.Sprintf("upstream %q returned %d", failure.Upstream, status)
+			s.metrics.ObserveUpstream(upstream, false)
 			return
 		}
 		st, msg := relay.ErrStatus(failure)
@@ -114,6 +147,9 @@ func (s *Server) handleModelEndpoint(w http.ResponseWriter, r *http.Request, cli
 		errMsg = msg
 		common.WriteError(w, st, msg, "upstream_error", "")
 		status = st
+		if upstream != "" {
+			s.metrics.ObserveUpstream(upstream, false)
+		}
 		return
 	}
 	defer result.Close()
@@ -122,14 +158,17 @@ func (s *Server) handleModelEndpoint(w http.ResponseWriter, r *http.Request, cli
 	streamed, inTok, outTok, _ = result.WriteTo(w)
 	status = result.StatusCode()
 	upstream = result.Upstream
+	s.metrics.ObserveUpstream(upstream, status >= 200 && status < 300)
 }
 
-// record writes one log entry (JSONL + ring + totals).
-func (s *Server) record(r *http.Request, logToken, model, upstream string, status int, stream bool, start time.Time, in, out int, errMsg string) {
+// record writes one log entry (JSONL + ring + totals + aggregate + metrics).
+func (s *Server) record(r *http.Request, reqID, logToken, device, model, upstream string, status int, stream bool, start time.Time, in, out int, errMsg string) {
 	cfg := s.holder.Get()
 	e := stats.Entry{
 		Time:      time.Now().Format(time.RFC3339),
+		RequestID: reqID,
 		Token:     logToken,
+		Device:    device,
 		Path:      r.URL.Path,
 		Model:     model,
 		Upstream:  upstream,
@@ -143,6 +182,8 @@ func (s *Server) record(r *http.Request, logToken, model, upstream string, statu
 	}
 	s.totals.Add(e)
 	s.logger.Log(e)
+	s.aggregate.Add(e)
+	s.metrics.ObserveRequest(status, e.LatencyMS)
 }
 
 // costFor estimates cost in yuan: in/1e6*priceIn + out/1e6*priceOut.
@@ -219,6 +260,11 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	}
 	for a := range cfg.Aliases {
 		set[a] = true
+	}
+	for _, rule := range cfg.AliasRules {
+		if !rule.Regex && rule.Pattern != "" {
+			set[rule.Pattern] = true
+		}
 	}
 
 	names := make([]string, 0, len(set))

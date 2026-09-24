@@ -1,0 +1,10 @@
+.git
+.github
+*.jsonl
+*.log
+data/
+dist/
+liapi
+liapi.exe
+SECURITY.md
+CONTRIBUTING.md
