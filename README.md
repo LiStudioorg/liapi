@@ -87,7 +87,7 @@ liapi/
 │   └── admin.go             # 管理 token 校验（独立）
 ├── routing/
 │   ├── router.go            # 候选收集 → priority 升序 → 组内加权随机打散
-│   └── aliases.go           # （P2）模型别名 / 参数覆写
+│   └── router_test.go       # 别名 / fallback / 策略 / group 测试
 ├── relay/
 │   ├── relay.go             # 转发主循环（含故障转移 / 重试）
 │   ├── stream.go            # SSE 流式复制（32KB 缓冲 + Flusher）
@@ -97,12 +97,12 @@ liapi/
 │   ├── server.go            # ServeMux 路由注册（Go 1.22 方法路由）
 │   ├── handler_v1.go        # /v1/chat/completions、completions、embeddings、
 │   │                        #   messages、models 的实现
-│   └── handler_admin.go     # /admin/api/*
-├── adminui/
-│   └── index.html           # 单文件管理台（go:embed 打包）
+│   ├── handler_admin.go     # /admin/api/* + SPA 静态托管
+│   └── adminui/             # 管理台构建产物（go:embed all:adminui）
+├── web/                     # 管理台源码（Nuxt 4 + fuxsto-design）
 ├── stats/
 │   ├── logger.go            # JSONL 写文件 + 环形缓冲（数组+取模）
-│   ├── limiter.go           # 固定窗口限流 map[token]{count,reset} + 定期清理
+│   ├── limiter.go           # 滑动窗口限流 + 定期清理
 │   ├── health.go            # 后台探测 goroutine，内存 map 存状态
 │   └── totals.go            # 全量计数/用量/费用的原子聚合
 └── README.md
@@ -556,13 +556,15 @@ open http://localhost:8787/
 
 ```
 main.go                     server/handler_v1.go      routing/router.go
-config/config.go            server/handler_admin.go   routing/aliases.go
-config/holder.go            server/server.go          relay/relay.go
-auth/auth.go                stats/logger.go           relay/stream.go
-auth/admin.go               stats/limiter.go          relay/usage.go
-common/errors.go            stats/health.go           relay/http.go
-common/token.go             stats/totals.go           server/adminui/ (SPA)
-                                                      web/ (Nuxt 源码)
+config/config.go            server/handler_admin.go   relay/relay.go
+config/holder.go            server/server.go          relay/stream.go
+config/interop.go           server/requestid.go       relay/usage.go
+auth/auth.go                server/adminui/ (SPA)     relay/http.go
+auth/admin.go               web/ (Nuxt 源码)          stats/logger.go
+common/errors.go            stats/aggregate.go        stats/limiter.go
+common/token.go             stats/metrics.go          stats/quota.go
+stats/health.go             stats/alerts.go           stats/audit.go
+stats/totals.go
 ```
 
 ---

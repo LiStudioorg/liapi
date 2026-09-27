@@ -1,7 +1,24 @@
 # Liapi 开发文档
 
-> 面向贡献者与维护者的开发指南。功能规格与配置字段见 [README.md](README.md)；
-> 协作规范见 [CONTRIBUTING.md](CONTRIBUTING.md)；安全策略见 [SECURITY.md](SECURITY.md)。
+> 面向贡献者与维护者的开发指南。
+> 功能规格与配置字段见 [README.md](README.md)；协作规范见 [CONTRIBUTING.md](CONTRIBUTING.md)；
+> 安全策略见 [SECURITY.md](SECURITY.md)。
+
+## 目录
+
+- [0. 铁律（Must Follow）](#0-铁律must-follow)
+- [1. 项目定位](#1-项目定位)
+- [2. 架构总览](#2-架构总览)
+- [3. 目录结构](#3-目录结构)
+- [4. 核心数据流](#4-核心数据流)
+- [5. 配置与热重载](#5-配置与热重载)
+- [6. 安全约定](#6-安全约定不可违背)
+- [7. 开发环境与常用命令](#7-开发环境与常用命令)
+- [8. 管理台前端（Nuxt 4 / fuxsto-design）](#8-管理台前端nuxt-4--fuxsto-design)
+- [9. 提交前检查清单（本地与 CI 同等）](#9-提交前检查清单本地与-ci-同等)
+- [10. 测试指南](#10-测试指南)
+- [11. CI 与发布流程](#11-ci-与发布流程)
+- [12. 修改配置 schema 的注意事项](#12-修改配置-schema-的注意事项)
 
 ---
 
@@ -20,6 +37,16 @@
 
 - 合并到 `main`（如需要）只能通过受控的 Pull Request 由维护者执行，开发者本人不得直接推送。
 
+### 0.1 构建产物必须随源码提交
+
+管理台产物 `server/adminui/` 由 `//go:embed all:adminui` 打包进二进制，**必须提交进仓库**：
+CI / Docker 的 Go 构建阶段不含 Node，若产物缺失则 `go build` 直接失败。
+
+- 改动 `web/` 后，先运行 `./buildadmin.sh` 重新生成，再连同源码一起提交。
+- 不要手工编辑 `server/adminui/` 下任何文件（全是生成产物，会被下次构建覆盖）。
+- `.gitignore` 只忽略 `web/node_modules`、`web/.nuxt`、`web/.output` 等中间物，
+  **不**忽略 `server/adminui/`。
+
 ---
 
 ## 1. 项目定位
@@ -36,7 +63,8 @@ Liapi 是自托管、OpenAI 兼容的 API 网关：对外暴露 `/v1/*`，对内
 
 - **技术栈：Go 1.22+（约定 `go 1.22`）/ 纯标准库，零第三方依赖。**
 - `go.mod` 必须保持 stdlib-only，这是硬约束（见 CONTRIBUTING）。
-- 单个二进制 + 内嵌管理台（`//go:embed`），`go build` 一步出产物。
+- **Go 服务**单二进制 + 内嵌管理台（`//go:embed`），`go build` 一步出产物。
+- **管理台前端**为独立 Nuxt 工程（`web/`），构建产物 `server/adminui/` 再被 Go 内嵌。
 
 ---
 
@@ -57,7 +85,7 @@ Liapi 是自托管、OpenAI 兼容的 API 网关：对外暴露 `/v1/*`，对内
                         │   └─ 日志（JSONL + 环形缓冲）            │
                         │                                      │
                         │  /admin/api/*  管理接口（独立鉴权）       │
-                        │  /             内嵌管理台（单文件）       │
+                        │  /             内嵌管理台 SPA（Nuxt）    │
                         │  /metrics      Prometheus 文本          │
                         │                                      │
                         │  后台 goroutine：健康探测 / 配额清理 /    │
@@ -86,32 +114,42 @@ Liapi 是自托管、OpenAI 兼容的 API 网关：对外暴露 `/v1/*`，对内
 liapi/
 ├── go.mod                    # module liapi / go 1.22（零依赖）
 ├── main.go                   # 入口：加载配置、装配依赖、启动 HTTP、优雅退出
+├── buildadmin.sh             # 构建管理台 SPA 到 server/adminui（改 web/ 后运行）
+├── buildrelease.sh           # 交叉编译单个平台（release.yml 调用）
 ├── config/
 │   ├── config.go             # Config/Upstream/Device/AliasRule/... + 默认值 + Validate + 原子 Save
+│   ├── config_test.go
 │   ├── holder.go             # 配置 Holder（RWMutex，热重载单一数据源）
 │   └── interop.go            # OneAPI channels 导入
 ├── common/
 │   ├── errors.go             # OpenAI 错误格式 {"error":{...}} 与写出
-│   └── token.go              # 常量时间比较 / SHA-256 / 脱敏
+│   ├── token.go              # 常量时间比较 / SHA-256 / 脱敏
+│   └── token_test.go
 ├── auth/
 │   ├── auth.go               # 客户端 token / 设备 token 校验
-│   └── admin.go              # 管理 token 校验 + 每 IP 失败锁定
+│   ├── admin.go              # 管理 token 校验 + 每 IP 失败锁定
+│   └── auth_test.go
 ├── routing/
-│   └── router.go             # 别名解析 + 候选收集 + fallback/strategy/group/健康过滤
+│   ├── router.go             # 别名解析 + 候选收集 + fallback/strategy/group/健康过滤
+│   ├── router_test.go
+│   └── fallback_test.go
 ├── relay/
 │   ├── relay.go              # 转发主循环（重试 / 故障转移 / 失败分类）
 │   ├── stream.go             # SSE 流式复制（Flusher）
 │   ├── usage.go              # 用量抽取（OpenAI / Anthropic 两套字段）
-│   └── http.go               # 头透传、响应头清洗、尾缓冲
+│   ├── http.go               # 头透传、响应头清洗、尾缓冲
+│   └── {relay,retry}_test.go
 ├── server/
 │   ├── server.go             # ServeMux 路由注册 + admin 中间件（IP/锁定/限流/token）
 │   ├── handler_v1.go         # /v1/* 业务实现
 │   ├── handler_admin.go      # /admin/api/* 实现 + SPA 静态托管
 │   ├── requestid.go          # X-Request-ID 中间件
-│   └── adminui/              # 管理台构建产物（go:embed all:adminui），勿手改
+│   ├── adminui/              # 管理台构建产物（go:embed all:adminui），勿手改
+│   └── {server,policy,failover,adminui,helpers}_test.go
 ├── web/                      # 管理台源码（Nuxt 4 + fuxsto-design，独立于 Go）
 │   ├── nuxt.config.ts        # ssr:false + nitro.preset=static，产物输出到 ../server/adminui
 │   ├── package.json          # Nuxt 4 / Vue 3 / Tailwind v4 / fuxsto-design
+│   ├── tsconfig.json
 │   └── app/
 │       ├── app.vue           # 根组件
 │       ├── layouts/default.vue  # NewAPI 风格侧边栏 + 顶栏 + 路由过渡
@@ -119,6 +157,7 @@ liapi/
 │       ├── components/       # Field / DialogPanel / StatTile
 │       ├── composables/      # useApi（admin token + fetch）/ useUi（toast/confirm）
 │       ├── types/api.ts      # 与 Go 端 JSON 契约对应的类型
+│       ├── utils/format.ts   # 数字/时间/状态格式化
 │       └── assets/css/main.css
 ├── stats/
 │   ├── logger.go             # JSONL 写入 + 环形缓冲 + 保留策略
@@ -129,7 +168,8 @@ liapi/
 │   ├── aggregate.go          # 统计聚合（分维度 / 分位数）
 │   ├── metrics.go            # Prometheus 指标
 │   ├── alerts.go             # Webhook / Bark 告警 + 去重
-│   └── audit.go              # 管理端访问审计环
+│   ├── audit.go              # 管理端访问审计环
+│   └── {stats,testhelpers}_test.go
 └── .github/workflows/{ci,release}.yml
 ```
 
@@ -204,9 +244,7 @@ RequestID 中间件（生成/回显 X-Request-ID）
 - 热重载：`Holder.Set(newCfg)`；所有请求**每次现取** `holder.Get()`，不缓存。
 - 管理台是 Nuxt 生成的静态 SPA，产物位于 `server/adminui/`，由
   `server/server.go` 的 `//go:embed all:adminui` 打包进二进制；
-  `handler_admin.go` 的 `adminUI` 负责静态资源 + SPA 回退（未知路径 → `index.html`）。
-- 构建产物**已提交**（CI/Docker 可在无 Node 环境下 `go build`）；
-  改动 `web/` 后必须运行 `./buildadmin.sh` 并提交 `server/adminui/`。
+  `handler_admin.go` 的 `adminUI` 负责静态资源 + SPA 回退（未知 GET 路径 → `index.html`）。
 
 ---
 
@@ -219,6 +257,8 @@ RequestID 中间件（生成/回显 X-Request-ID）
    （`admin_rate_per_minute`）→ admin token。每次尝试写入审计环。
 4. **X-Forwarded-For 仅在配置白名单时信任**（防伪造）。
 5. 日志文件 `0600`；配置文件 `0600`。
+6. 前端 admin token 仅存浏览器 `localStorage`，随请求以 `Authorization: Bearer` 发送；
+   不得写入仓库或日志。
 
 ---
 
@@ -252,7 +292,7 @@ config.Load → Holder → stats.NewLogger / NewLimiter / NewTotals
 
 ---
 
-## 7.1 管理台前端（Nuxt 4 + fuxsto-design）
+## 8. 管理台前端（Nuxt 4 / fuxsto-design）
 
 管理台源码在 `web/`，与 Go 代码完全解耦；**唯一契约是 `/admin/api/*` 的 JSON**。
 
@@ -264,24 +304,37 @@ config.Load → Holder → stats.NewLogger / NewLimiter / NewTotals
 - API 客户端：`app/composables/useApi.ts`——admin token 存 `localStorage`，
   请求带 `Authorization: Bearer <admin_token>`，401 时提示重新输入。
 - 类型契约：`app/types/api.ts`，字段须与 `server/handler_admin.go` 保持一致。
+- 开发代理：`nuxt.config.ts` 的 `nitro.devProxy` 已把 `/admin/api`、`/v1`、`/metrics`
+  转发到本地 `127.0.0.1:8787`，可先起 Go 服务再 `npm run dev`。
 
 常用命令（在 `web/` 内）：
 
 ```bash
 npm install          # 安装依赖（首次）
-npm run dev          # 开发服务器（默认 3000，需自行代理 /admin/api 到 8787）
+npm run dev          # 开发服务器（默认 3000，已代理 /admin/api 到 8787）
 npm run typecheck    # vue-tsc 类型检查
 npm run build        # 生成静态产物到 server/adminui
 ```
 
-或在仓库根执行 `./buildadmin.sh` 一键构建。
+或在仓库根执行 `./buildadmin.sh` 一键构建（缺依赖会先 `npm ci`）。
+
+### 8.1 构建产物生命周期
+
+```
+web/app/**  ──npm run build──►  server/adminui/**  ──go:embed──►  二进制
+   (源码，提交)                     (产物，提交)                    (go build)
+```
+
+- 两者都提交；CI 会在 Go 构建前重新生成产物并覆盖，确保校验的是最新源码。
+- 本地只需保证「改了 `web/` 就一定跑过 `./buildadmin.sh` 并提交产物」。
+- 排查页面 404/资源 404：确认 `server/adminui/index.html` 与 `_nuxt/` 已存在且被提交。
 
 ---
 
-## 8. 提交前检查清单（本地 = CI 同等要求）
+## 9. 提交前检查清单（本地与 CI 同等）
 
 ```bash
-gofmt -l .        # 必须无输出
+gofmt -l .        # 必须无输出（注意：仓库统一 CRLF，Linux CI 下为 LF）
 go vet ./...
 go test ./...
 go build ./...
@@ -289,10 +342,9 @@ go build ./...
 cd web && npm run typecheck && npm run build   # 前端（改了 web/ 时）
 ```
 
-`.github/workflows/ci.yml` 在**所有分支** push 与 PR 上运行：先构建前端 SPA
-（`frontend` job），再以其产物运行 Go 的 format/vet/test/build（`test` job）。
-`.github/workflows/release.yml` 在 tag push 时先构建前端，再经 `buildrelease.sh`
-交叉编译，版本注入 `-X main.version=<tag>`。
+> Windows 本地 `go test ./...` 会因文件权限校验（`TestLoadPermCheck` 等）失败，
+> 这是平台差异（`chmod` 在 Windows 为 no-op）；Linux CI 下正常。可用
+> `LIAPI_SKIP_PERM_CHECK=1` 跳过相关校验后在本地跑其余测试。
 
 **推送：**
 
@@ -305,35 +357,58 @@ git push origin beta          # 只推 beta
 
 ---
 
-## 9. 测试指南
+## 10. 测试指南
 
 - 测试与被测文件同目录：`foo.go` → `foo_test.go`。
 - 需覆盖的核心逻辑：路由（fallback 链、策略、别名、group、健康过滤）、
-  重试/故障转移分类、限流/配额窗口、配置校验、设备鉴权。
+  重试/故障转移分类、限流/配额窗口、配置校验、设备鉴权、管理台 SPA 托管。
 - HTTP/转发类测试用 `httptest` 起假上游（可注入失败/延迟/SSE）。
 - 时间相关逻辑用注入时钟（如 `SetNow`），**不要**用 `time.Sleep`。
-- 临时产物（health/log 文件）写入临时目录，勿污染仓库。
+- 临时产物（health/log 文件）写入临时目录（`t.TempDir()`），勿污染仓库。
+- 共享测试桩在 `server/helpers_test.go`、`stats/testhelpers_test.go`：
+  `newTestServer` 装配完整 Server，`serve`/`do` 发送请求，`newOKUpstream` 起假上游。
 
 ---
 
-## 10. 发布流程
+## 11. CI 与发布流程
+
+### 11.1 CI（`.github/workflows/ci.yml`）
+
+在所有分支 push 与 PR 上运行两个 job：
+
+1. `frontend`（Node 22）：`npm ci` → `npm run typecheck` → `npm run build`，
+   上传 `server/adminui` 为 artifact。
+2. `test`（Go stable，`needs: frontend`）：下载 artifact 覆盖 `server/adminui`，
+   再执行 `gofmt -l .` / `go vet` / `go test` / `go build`，确保内嵌的是最新产物。
+
+### 11.2 自动发布（`publish` job，仅 beta）
+
+- 触发条件：`push` 且 `ref == refs/heads/beta`，且 `frontend` + `test` 均通过。
+- 行为：交叉编译 6 个常用平台（linux/windows/darwin × amd64/arm64），
+  版本号注入 `beta-<sha>`，**覆盖式**发布到固定 tag `beta-latest` 的**正式 Release**。
+- 每次发布前清空旧资产，保证 `beta-latest` 只保留最新提交的产物 + `checksums.txt`。
+- `make_latest: false`：不抢占版本化 Release 的 "Latest" 徽章。
+
+### 11.3 版本化发布（`.github/workflows/release.yml`，打 tag）
 
 1. 维护者切 tag（如 `vX.Y.Z`）并推送。
-2. `release.yml` 枚举 `go tool dist list`，Linux/macOS runner 并行交叉编译
-   （Android 下载/缓存 NDK；iOS 用 Xcode clang 输出 c-archive）。
-3. 汇总产物 + `checksums.txt`，用 `softprops/action-gh-release` 发布 Release。
+2. `release.yml` 先构建前端，再枚举 `go tool dist list`，Linux/macOS runner 并行
+   交叉编译（Android 下载/缓存 NDK；iOS 用 Xcode clang 输出 c-archive）。
+3. 汇总产物 + `checksums.txt`，用 `softprops/action-gh-release` 发布 Release，
+   版本注入 `-X main.version=<tag>`。
 
-> 注意：发布/合并涉及 `main` 的操作只能由维护者通过受控流程执行；
+> 发布/合并涉及 `main` 的操作只能由维护者通过受控流程执行；
 > 日常开发一律停留在 `beta`（见第 0 节铁律）。
 
 ---
 
-## 11. 修改配置 schema 的注意事项
+## 12. 修改配置 schema 的注意事项
 
 - 新增/变更字段：同步更新 `config/config.go` 的 struct 与 `Validate()`，
   并在 `README.md` 字段表补充说明与迁移影响。
+- 若字段出现在管理台表单：同步更新 `web/app/types/api.ts` 与对应页面组件。
 - 未讨论不得改动 `go` directive。
-- 保持零第三方依赖；确需功能时优先在树内实现。
+- 保持零第三方依赖（Go 侧）；确需功能时优先在树内实现。
 
 ---
 
