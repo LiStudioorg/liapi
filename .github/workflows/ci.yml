@@ -5,6 +5,9 @@ on:
     branches: ['**']
   pull_request:
 
+permissions:
+  contents: write
+
 jobs:
   frontend:
     runs-on: ubuntu-latest
@@ -67,3 +70,67 @@ jobs:
 
       - name: Build
         run: go build ./...
+
+  # ── 自动预发布：仅当 beta 分支上 CI 全绿时触发 ─────────
+  # 固定 tag `beta-latest`，每次成功都覆盖为该提交的构建产物。
+  # 注意：不依赖 workflow_run（那要求工作流先在默认分支 main 上存在）。
+  publish:
+    needs: [frontend, test]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/beta'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: false
+
+      - name: Use freshly built admin UI
+        uses: actions/download-artifact@v4
+        with:
+          name: adminui
+          path: server/adminui
+
+      - name: Build release binaries
+        env:
+          ENABLE_VERSION_INJECT: '1'
+          VERSION: beta-${{ github.sha }}
+        run: |
+          chmod +x buildrelease.sh
+          # Build a practical subset for a beta prerelease (fast, most-used
+          # platforms); full matrix is reserved for tagged releases.
+          mkdir -p dist
+          ok=0
+          for T in linux/amd64 linux/arm64 windows/amd64 windows/arm64 darwin/amd64 darwin/arm64; do
+            if ./buildrelease.sh "$T"; then ok=$((ok+1)); else echo "skip $T"; fi
+          done
+          echo "built=$ok"
+          test "$ok" -gt 0 || { echo "no binaries built"; exit 1; }
+
+      - name: Generate checksums
+        run: |
+          cd dist
+          sha256sum * > checksums.txt
+          echo "共 $(ls | wc -l) 个文件"
+          ls -lh
+
+      - name: Publish beta prerelease
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: beta-latest
+          name: Beta build ${{ github.sha }}
+          target_commitish: ${{ github.sha }}
+          prerelease: true
+          draft: false
+          files: dist/*
+          generate_release_notes: true
+          body: |
+            Automated prerelease from the `beta` branch.
+
+            - Commit: `${{ github.sha }}`
+            - Version injected into binaries: `beta-${{ github.sha }}`
+            - Built by CI run ${{ github.run_id }}
+
+            ⚠️ Unstable — for testing only. Pull `beta` or wait for a tagged
+            release for production use.
