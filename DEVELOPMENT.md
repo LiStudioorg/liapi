@@ -156,6 +156,7 @@ liapi/
 │       ├── layouts/default.vue  # NewAPI 风格侧边栏 + 顶栏 + 路由过渡（含未认证跳转）
 │       ├── layouts/auth.vue  # 登录页专用居中布局
 │       ├── pages/login.vue   # 登录页（token 校验 + 回跳 redirect）
+│       ├── pages/config.vue  # 配置页（表单/JSON 双视图可视化编辑 + 热重载）
 │       ├── pages/*.vue       # 概览/上游/令牌/设备/统计/日志/健康/配置/调试
 │       ├── components/       # Field / DialogPanel / StatTile
 │       ├── composables/      # useApi（admin token + fetch）/ useUi（toast/confirm/handleError）
@@ -252,6 +253,15 @@ RequestID 中间件（生成/回显 X-Request-ID）
   **首次生成的密码明文**（仅首次启动出现，之后不再显示）以及 `admin_token`（供 /metrics 与脚本），
   方便直接登录；设 `LIAPI_MASK_ADMIN_TOKEN=1` 可只打印脱敏值
   （共享/远程终端、录屏等场景）。
+- 管理台「配置」页（`web/app/pages/config.vue`）提供**表单 / JSON 双视图**：
+  - 表单视图按 Collapse 分组（监听与转发 / 路由与重试 / 健康检查 / 日志 / 管理台与鉴权 /
+    别名·降级链·价目 / 告警）编辑各顶层字段；键值型字段（`aliases` / `fallbacks` /
+    `prices` / `alias_rules`）用增删行编辑器维护。
+  - 保存时 `buildConfig()` 以 JSON 视图为**基底**，仅覆盖表单涉及的字段，
+    因此表单未覆盖的字段（`token_policies` / `token_quotas` / `upstreams` / `devices` 等）原样保留。
+  - `upstreams` 与 `devices` 不在此页编辑，分别由「上游」「设备」专页维护。
+  - 脱敏密钥（含 `...`）无需手填：服务端 `resolveMaskedSecrets` 会在保存时还原为原值；
+    `admin_password` 留空即保持原密码，填写则更新为新密码。
 
 ---
 
@@ -330,6 +340,22 @@ config.Load → Holder → stats.NewLogger / NewLimiter / NewTotals
 - 开发代理：`nuxt.config.ts` 的 `nitro.devProxy` 已把 `/admin/api`、`/v1`、`/metrics`
   转发到本地 `127.0.0.1:8787`，可先起 Go 服务再 `npm run dev`。
 
+### 8.1 配置页可视化编辑（`app/pages/config.vue`）
+
+配置页是「可视化编辑 + 热重载」的统一入口，控件与 `config/config.go` 字段一一对应：
+
+- 顶部 `Segmented` 切换 **表单 / JSON** 两个视图，共用同一份 `text`（GET `/admin/api/config` 返回的脱敏 JSON）。
+- 表单字段用 `reactive(form)` 承载标量项，用 `ref([])` 承载键值/列表项；
+  `readForm(cfg)` 把配置铺进表单，`buildConfig()` 反向合成。
+- **合成策略**：`buildConfig()` 先解析 JSON 视图为基底对象，再 `Object.assign` 覆盖表单字段。
+  这样新增字段只要没加进表单就会自动透传，避免「表单漏字段导致配置丢失」。
+- 保存仍走 `POST /admin/api/config` 单一接口，服务端做 `Validate` → `Save`（原子）→ `Holder.Set`；
+  校验失败保留旧配置，前端提示错误。
+- 导出的 JSON（`/config/export`）含明文密钥，仅用于备份，切勿提交仓库。
+
+> 新增配置字段时（见第 12 节）：除更新 `config/config.go` 与 README 字段表外，
+> 若希望出现在管理台表单中，还需同步 `web/app/types/api.ts` 类型与本页控件。
+
 常用命令（在 `web/` 内）：
 
 ```bash
@@ -341,7 +367,7 @@ npm run build        # 生成静态产物到 server/adminui
 
 或在仓库根执行 `./buildadmin.sh` 一键构建（缺依赖会先 `npm ci`）。
 
-### 8.1 构建产物生命周期
+### 8.2 构建产物生命周期
 
 ```
 web/app/**  ──npm run build──►  server/adminui/**  ──go:embed──►  二进制
@@ -429,7 +455,10 @@ git push origin beta          # 只推 beta
 
 - 新增/变更字段：同步更新 `config/config.go` 的 struct 与 `Validate()`，
   并在 `README.md` 字段表补充说明与迁移影响。
-- 若字段出现在管理台表单：同步更新 `web/app/types/api.ts` 与对应页面组件。
+- 若字段出现在管理台表单：同步更新 `web/app/types/api.ts`、`web/app/pages/config.vue`
+  的 `form`/`readForm()`/`buildConfig()`（或对应专页组件）。
+- 兼容旧配置：`buildConfig()` 以 JSON 视图为基底，未加入表单的新字段会透传，
+  不会因表单遗漏而被抹掉；但仍应把常用字段补进表单以便可视化编辑。
 - 密钥类字段需在 `server/handler_admin.go` 的 `adminGetConfig` 脱敏、在
   `resolveMaskedSecrets` 还原（如 `admin_password_hash` 已在两处处理）。
 - 未讨论不得改动 `go` directive。
