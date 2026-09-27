@@ -2,6 +2,8 @@ import { Message, Dialog } from 'fuxsto-design'
 
 /** Thin wrappers so pages get consistent feedback + a promise-based confirm. */
 export function useUi() {
+  const router = useRouter()
+
   const toast = {
     success: (m: string) => Message.success(m),
     error: (m: string) => Message.error(m),
@@ -28,12 +30,11 @@ export function useUi() {
     })
   }
 
-  /** Handle API errors, auto-prompting for the admin token on 401. */
-  function handleError(e: unknown, setToken: (v: string) => void) {
+  /** Handle API errors; on 401 route to the login page (no browser dialog). */
+  function handleError(e: unknown) {
     const err = e as Error & { unauthorized?: boolean }
     if (err.unauthorized) {
-      const t = window.prompt('请输入 admin token')
-      if (t) setToken(t)
+      router.push({ path: '/login', query: { redirect: router.currentRoute.value.fullPath } })
       return
     }
     toast.error(err.message || String(e))

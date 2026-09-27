@@ -4,7 +4,7 @@ import { RefreshCw } from 'lucide-vue-next'
 import type { LogEntry } from '~/types/api'
 import { fmtNum, fmtTime, statusTone } from '~/utils/format'
 
-const { request, setToken } = useApi()
+const { request } = useApi()
 const { handleError } = useUi()
 
 const list = ref<LogEntry[]>([])
@@ -44,7 +44,7 @@ async function load() {
     if (status.value) url += '&status=' + encodeURIComponent(status.value)
     list.value = await request<LogEntry[]>(url)
   } catch (e) {
-    handleError(e, setToken)
+    handleError(e)
   } finally {
     loading.value = false
   }

@@ -3,7 +3,7 @@ import { Card, Button, Table, Input, Empty } from 'fuxsto-design'
 import { Plus, Trash2 } from 'lucide-vue-next'
 import type { ClientToken } from '~/types/api'
 
-const { request, setToken } = useApi()
+const { request } = useApi()
 const { toast, confirm, handleError } = useUi()
 
 const list = ref<ClientToken[]>([])
@@ -19,7 +19,7 @@ async function load() {
   try {
     list.value = await request<ClientToken[]>('/tokens')
   } catch (e) {
-    handleError(e, setToken)
+    handleError(e)
   } finally {
     loading.value = false
   }
@@ -35,7 +35,7 @@ async function add() {
     toast.success('已添加')
     await load()
   } catch (e) {
-    handleError(e, setToken)
+    handleError(e)
   }
 }
 
@@ -49,7 +49,7 @@ async function remove(full: string) {
     toast.success('已删除')
     await load()
   } catch (e) {
-    handleError(e, setToken)
+    handleError(e)
   }
 }
 </script>

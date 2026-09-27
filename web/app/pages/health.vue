@@ -4,7 +4,7 @@ import { Activity, RefreshCw, ShieldCheck } from 'lucide-vue-next'
 import type { HealthStatus, ProbeEvent, AuditEvent } from '~/types/api'
 import { fmtTime } from '~/utils/format'
 
-const { request, setToken } = useApi()
+const { request } = useApi()
 const { toast, handleError } = useUi()
 
 const health = ref<HealthStatus[]>([])
@@ -24,7 +24,7 @@ async function loadAll() {
     history.value = hi
     audit.value = a
   } catch (e) {
-    handleError(e, setToken)
+    handleError(e)
   } finally {
     loading.value = false
   }
@@ -38,7 +38,7 @@ async function probe() {
     toast.success('探测完成')
     await loadAll()
   } catch (e) {
-    handleError(e, setToken)
+    handleError(e)
   } finally {
     probing.value = false
   }

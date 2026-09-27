@@ -17,10 +17,10 @@ import {
   CircleUser,
   Gauge,
 } from 'lucide-vue-next'
-import { Message } from 'fuxsto-design'
 
-const { token, loadToken, setToken, clearToken } = useApi()
+const { token, loadToken, clearToken } = useApi()
 const route = useRoute()
+const router = useRouter()
 
 const NAV = [
   { to: '/', label: '概览', icon: LayoutDashboard },
@@ -42,6 +42,7 @@ onMounted(() => {
   const saved = localStorage.getItem('liapi_theme')
   dark.value = saved ? saved === 'dark' : true
   applyTheme()
+  if (!token.value) goLogin()
 })
 
 function applyTheme() {
@@ -57,11 +58,10 @@ function toggleTheme() {
   applyTheme()
 }
 
-function promptToken() {
-  const t = window.prompt('请输入 admin token', token.value)
-  if (t === null) return
-  setToken(t)
-  if (t.trim()) Message.success('token 已更新')
+// Auth gate: without a token the console is unusable, so send the user to
+// the dedicated login page (no browser prompt) and preserve the target.
+function goLogin() {
+  router.push({ path: '/login', query: { redirect: route.fullPath } })
 }
 
 watch(
@@ -116,10 +116,10 @@ const activeLabel = computed(
       <div class="border-t border-border p-3">
         <button
           class="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-          @click="clearToken"
+          @click="clearToken(); goLogin()"
         >
           <LogOut :size="16" />
-          <span>清除 Token</span>
+          <span>退出登录</span>
         </button>
       </div>
     </aside>
@@ -159,11 +159,12 @@ const activeLabel = computed(
           </button>
           <button
             class="flex items-center gap-2 rounded-lg border border-border px-3 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-            @click="promptToken"
+            :title="token ? '切换 / 更新 token' : '登录'"
+            @click="goLogin"
           >
             <CircleUser :size="15" />
             <span class="hidden sm:inline">
-              {{ token ? '已认证' : '设置 Token' }}
+              {{ token ? '已认证' : '未认证' }}
             </span>
           </button>
         </div>

@@ -3,7 +3,7 @@ import { Card, Statistic, Skeleton } from 'fuxsto-design'
 import type { Overview } from '~/types/api'
 import { fmtNum, fmtCost } from '~/utils/format'
 
-const { request, setToken } = useApi()
+const { request } = useApi()
 const { handleError } = useUi()
 
 const data = ref<Overview | null>(null)
@@ -13,7 +13,7 @@ async function load() {
   try {
     data.value = await request<Overview>('/overview')
   } catch (e) {
-    handleError(e, setToken)
+    handleError(e)
   } finally {
     loading.value = false
   }

@@ -22,6 +22,20 @@ import (
 // version is overridden at link time by buildrelease.sh (-X main.version=…).
 var version = "dev"
 
+// printAdminBanner makes the admin token easy to spot in the terminal. The
+// plaintext token is printed by default so an operator can log in immediately;
+// set LIAPI_MASK_ADMIN_TOKEN=1 to print only a masked form (shared/remote
+// terminals, screen recordings, etc.).
+func printAdminBanner(cfg *config.Config, configPath string) {
+	token := cfg.AdminToken
+	if os.Getenv("LIAPI_MASK_ADMIN_TOKEN") == "1" {
+		token = common.MaskToken(cfg.AdminToken) + "  (masked; see " + configPath + ")"
+	}
+	const bar = "════════════════════════════════════════════════════════════════"
+	log.Printf("\n%s\n  Liapi 管理台  http://<host>%s/\n\n  Admin Token :  %s\n\n  登录入口    http://<host>%s/\n  提示        终端会显示明文，设为 LIAPI_MASK_ADMIN_TOKEN=1 可隐藏\n%s",
+		bar, cfg.Addr, token, cfg.Addr, bar)
+}
+
 func main() {
 	configPath := flag.String("config", "config.json", "path to config file")
 	showVer := flag.Bool("version", false, "print version and exit")
@@ -39,10 +53,11 @@ func main() {
 	if len(cfg.ClientTokens) == 0 && len(cfg.Devices) == 0 {
 		log.Printf("[warn] no client_tokens/devices configured yet — all /v1/* requests will be rejected")
 	}
-	// Never log raw secrets: mask the admin token.
-	log.Printf("config loaded from %s (admin_token=%s)", *configPath, common.MaskToken(cfg.AdminToken))
 
 	holder := config.NewHolder(cfg)
+
+	log.Printf("config loaded from %s", *configPath)
+	printAdminBanner(cfg, *configPath)
 
 	logger, err := stats.NewLogger(cfg.LogFile, cfg.RingSize, cfg.LogMaxBytes)
 	if err != nil {

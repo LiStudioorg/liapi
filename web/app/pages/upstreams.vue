@@ -11,7 +11,7 @@ import {
 import { Plus, Pencil, Trash2 } from 'lucide-vue-next'
 import type { Upstream, HealthStatus } from '~/types/api'
 
-const { request, setToken } = useApi()
+const { request } = useApi()
 const { toast, confirm, handleError } = useUi()
 
 const list = ref<Upstream[]>([])
@@ -56,7 +56,7 @@ async function load() {
     list.value = ups
     health.value = Object.fromEntries(h.map((x) => [x.name, x]))
   } catch (e) {
-    handleError(e, setToken)
+    handleError(e)
   } finally {
     loading.value = false
   }
@@ -139,7 +139,7 @@ async function save() {
     showForm.value = false
     await load()
   } catch (e) {
-    handleError(e, setToken)
+    handleError(e)
   } finally {
     saving.value = false
   }
@@ -152,7 +152,7 @@ async function remove(name: string) {
     toast.success('已删除')
     await load()
   } catch (e) {
-    handleError(e, setToken)
+    handleError(e)
   }
 }
 </script>

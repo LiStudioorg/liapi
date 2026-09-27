@@ -4,7 +4,7 @@ import { Download, RefreshCw } from 'lucide-vue-next'
 import type { StatsSnapshot, StatRow } from '~/types/api'
 import { fmtNum, fmtCost } from '~/utils/format'
 
-const { request, download, setToken } = useApi()
+const { request, download } = useApi()
 const { handleError, toast } = useUi()
 
 const groupBy = ref<'model' | 'device' | 'day'>('model')
@@ -46,7 +46,7 @@ async function load() {
     snap.value = s
     top.value = t
   } catch (e) {
-    handleError(e, setToken)
+    handleError(e)
   } finally {
     loading.value = false
   }
@@ -74,7 +74,7 @@ async function exportStats(fmt: 'csv' | 'json') {
       fmt === 'csv' ? 'liapi-stats.csv' : 'liapi-stats.json',
     )
   } catch (e) {
-    handleError(e, setToken)
+    handleError(e)
   }
 }
 </script>

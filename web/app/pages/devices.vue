@@ -3,7 +3,7 @@ import { Card, Button, Table, Chip, Input, Switch, Alert, Empty } from 'fuxsto-d
 import { Plus, RefreshCw, Trash2 } from 'lucide-vue-next'
 import type { Device, DeviceCreateResult } from '~/types/api'
 
-const { request, setToken } = useApi()
+const { request } = useApi()
 const { toast, confirm, handleError } = useUi()
 
 const list = ref<Device[]>([])
@@ -36,7 +36,7 @@ async function load() {
   try {
     list.value = await request<Device[]>('/devices')
   } catch (e) {
-    handleError(e, setToken)
+    handleError(e)
   } finally {
     loading.value = false
   }
@@ -70,7 +70,7 @@ async function create() {
     toast.success('设备已创建')
     await load()
   } catch (e) {
-    handleError(e, setToken)
+    handleError(e)
   } finally {
     saving.value = false
   }
@@ -97,7 +97,7 @@ async function rotate(id: string) {
     toast.success('已轮换')
     await load()
   } catch (e) {
-    handleError(e, setToken)
+    handleError(e)
   }
 }
 
@@ -108,7 +108,7 @@ async function remove(id: string) {
     toast.success('已删除')
     await load()
   } catch (e) {
-    handleError(e, setToken)
+    handleError(e)
   }
 }
 </script>

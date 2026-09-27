@@ -3,7 +3,7 @@ import { Card, Button, Input, Textarea, Switch } from 'fuxsto-design'
 import { Send } from 'lucide-vue-next'
 import type { Config, TestResult } from '~/types/api'
 
-const { request, setToken } = useApi()
+const { request } = useApi()
 const { handleError } = useUi()
 
 const model = ref('')

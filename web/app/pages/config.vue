@@ -2,7 +2,7 @@
 import { Card, Button, Textarea } from 'fuxsto-design'
 import { RefreshCw, Save, Download, Upload, FileJson } from 'lucide-vue-next'
 
-const { request, download, setToken } = useApi()
+const { request, download } = useApi()
 const { toast, confirm, handleError } = useUi()
 
 const text = ref('')
@@ -15,7 +15,7 @@ async function load() {
     const cfg = await request<Record<string, unknown>>('/config')
     text.value = JSON.stringify(cfg, null, 2)
   } catch (e) {
-    handleError(e, setToken)
+    handleError(e)
   } finally {
     loading.value = false
   }
@@ -36,7 +36,7 @@ async function save() {
     toast.success('已保存并热重载')
     await load()
   } catch (e) {
-    handleError(e, setToken)
+    handleError(e)
   } finally {
     saving.value = false
   }
@@ -46,7 +46,7 @@ async function exportConfig() {
   try {
     await download('/config/export', 'liapi-config.json')
   } catch (e) {
-    handleError(e, setToken)
+    handleError(e)
   }
 }
 
@@ -63,7 +63,7 @@ async function importFile(file: File, format: 'liapi' | 'oneapi') {
     toast.success(format === 'oneapi' ? 'OneAPI 上游已导入' : '导入成功')
     await load()
   } catch (e) {
-    handleError(e, setToken)
+    handleError(e)
   }
 }
 
