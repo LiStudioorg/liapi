@@ -152,10 +152,12 @@ liapi/
 │   ├── tsconfig.json
 │   └── app/
 │       ├── app.vue           # 根组件
-│       ├── layouts/default.vue  # NewAPI 风格侧边栏 + 顶栏 + 路由过渡
+│       ├── layouts/default.vue  # NewAPI 风格侧边栏 + 顶栏 + 路由过渡（含未认证跳转）
+│       ├── layouts/auth.vue  # 登录页专用居中布局
+│       ├── pages/login.vue   # 登录页（token 校验 + 回跳 redirect）
 │       ├── pages/*.vue       # 概览/上游/令牌/设备/统计/日志/健康/配置/调试
 │       ├── components/       # Field / DialogPanel / StatTile
-│       ├── composables/      # useApi（admin token + fetch）/ useUi（toast/confirm）
+│       ├── composables/      # useApi（admin token + fetch）/ useUi（toast/confirm/handleError）
 │       ├── types/api.ts      # 与 Go 端 JSON 契约对应的类型
 │       ├── utils/format.ts   # 数字/时间/状态格式化
 │       └── assets/css/main.css
@@ -245,6 +247,9 @@ RequestID 中间件（生成/回显 X-Request-ID）
 - 管理台是 Nuxt 生成的静态 SPA，产物位于 `server/adminui/`，由
   `server/server.go` 的 `//go:embed all:adminui` 打包进二进制；
   `handler_admin.go` 的 `adminUI` 负责静态资源 + SPA 回退（未知 GET 路径 → `index.html`）。
+- 启动时 `main.go` 的 `printAdminBanner` 会以醒目方框打印 **admin token 明文**与
+  管理台地址，方便直接登录；设 `LIAPI_MASK_ADMIN_TOKEN=1` 可只打印脱敏值
+  （共享/远程终端、录屏等场景）。
 
 ---
 
@@ -258,7 +263,10 @@ RequestID 中间件（生成/回显 X-Request-ID）
 4. **X-Forwarded-For 仅在配置白名单时信任**（防伪造）。
 5. 日志文件 `0600`；配置文件 `0600`。
 6. 前端 admin token 仅存浏览器 `localStorage`，随请求以 `Authorization: Bearer` 发送；
-   不得写入仓库或日志。
+   不得写入仓库或日志。登录/更换 token 一律走 `/login` 页面，禁止用 `window.prompt`
+   等浏览器对话框收集密钥。
+7. 终端打印明文 admin token 属便利性取舍：默认开启，可用 `LIAPI_MASK_ADMIN_TOKEN=1`
+   关闭；生产环境若会把 stdout 接入共享日志，应设为 `1`。
 
 ---
 
@@ -270,8 +278,11 @@ cd liapi
 git checkout beta              # 铁律：工作在 beta 分支
 go test ./...
 go build -o liapi .
-./liapi -config config.json    # 首次运行生成 config.json（0600），打印 admin_token
+./liapi -config config.json    # 首次运行生成 config.json（0600），并在终端醒目打印 admin_token
 ```
+
+> 启动后终端会出现一个方框，其中 `Admin Token` 一行为明文，直接复制即可登录
+> `http://<host>:8787/`。如需隐藏：`LIAPI_MASK_ADMIN_TOKEN=1 ./liapi -config config.json`。
 
 冒烟：
 
@@ -301,8 +312,14 @@ config.Load → Holder → stats.NewLogger / NewLimiter / NewTotals
   `../server/adminui`，产出纯静态 SPA（客户端路由）。
 - 布局参考 NewApi：左侧固定侧边栏 + 顶栏，页面切换带过渡动画
   （`pageTransition`，`mode: out-in`）。
+- **登录**：`app/pages/login.vue` 是独立的登录页，配 `layouts/auth.vue`（居中品牌布局）。
+  - 未认证（`localStorage` 无 token）访问任意页面 → 自动跳转 `/login?redirect=<原路径>`。
+  - 登录时先以 token 调用 `/overview` 校验，成功才写入 `localStorage`（错误 token
+    不会覆盖已有的好 token），再回跳 `redirect`；登录页提供显示/隐藏切换。
+  - 任意接口返回 401 → `useUi.handleError` 清除无效态并跳转 `/login`。
+  - **禁止**使用 `window.prompt` / `window.confirm` 等浏览器对话框收集或确认密钥。
 - API 客户端：`app/composables/useApi.ts`——admin token 存 `localStorage`，
-  请求带 `Authorization: Bearer <admin_token>`，401 时提示重新输入。
+  请求带 `Authorization: Bearer <admin_token>`；`setToken('')` 即登出。
 - 类型契约：`app/types/api.ts`，字段须与 `server/handler_admin.go` 保持一致。
 - 开发代理：`nuxt.config.ts` 的 `nitro.devProxy` 已把 `/admin/api`、`/v1`、`/metrics`
   转发到本地 `127.0.0.1:8787`，可先起 Go 服务再 `npm run dev`。

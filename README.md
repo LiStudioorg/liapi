@@ -402,7 +402,7 @@ return failAll(lastErr)                       # 502 或透传最后一次的 sta
 | `/admin/api/stats/devices?n=` | GET | 设备用量排行 |
 | `/metrics` | GET | Prometheus 文本格式；`metrics_token`（`"-"`=免鉴权）或 admin token |
 
-管理台前端把 admin token 存 `localStorage`，每次请求带 `Authorization: Bearer <admin_token>`。**管理 token 与客户端 token 严格分离**。
+管理台前端通过独立的 `/login` 登录页输入 admin token（校验通过后存 `localStorage`，每次请求带 `Authorization: Bearer <admin_token>`）；未登录访问任意页面会自动跳转登录页，不使用浏览器原生对话框。**管理 token 与客户端 token 严格分离**。
 
 ### 7.3 部署（Docker）
 
@@ -537,9 +537,10 @@ docker build -t liapi . && docker run -p 8787:8787 -v "$PWD/data:/data" liapi
 ## 十四、运行方式
 
 ```bash
-# 首次运行自动生成默认 config.json（含随机 admin_token，打印到控制台）
+# 首次运行自动生成默认 config.json（含随机 admin_token，醒目打印到控制台方框中）
 go build -o liapi ./...
 ./liapi -config config.json
+# 想隐藏明文（共享日志/录屏）：LIAPI_MASK_ADMIN_TOKEN=1 ./liapi -config config.json
 
 # 冒烟
 curl http://localhost:8787/v1/models -H "Authorization: Bearer sk-client-aaa"
