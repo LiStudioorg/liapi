@@ -69,6 +69,42 @@ export function useApi() {
     return data as T
   }
 
+  /** Exchange username/password for a session token and store it. */
+  async function login(username: string, password: string): Promise<void> {
+    const res = await fetch(apiBase + '/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password }),
+    })
+    const text = await res.text()
+    let data: any = {}
+    if (text) {
+      try {
+        data = JSON.parse(text)
+      } catch {
+        data = {}
+      }
+    }
+    if (!res.ok) {
+      throw new Error(
+        data?.error?.message || text || 'HTTP ' + res.status,
+      )
+    }
+    if (!data?.token) throw new Error('登录响应缺少 token')
+    setToken(data.token as string)
+  }
+
+  /** Invalidate the current session server-side, then clear it locally. */
+  async function logout(): Promise<void> {
+    try {
+      if (token.value) await raw('/logout', { method: 'POST' })
+    } catch {
+      // ignore network errors on logout
+    } finally {
+      clearToken()
+    }
+  }
+
   /** Download a file with auth applied (stats/config export). */
   async function download(path: string, filename: string): Promise<void> {
     const res = await raw(path)
@@ -82,5 +118,5 @@ export function useApi() {
     URL.revokeObjectURL(url)
   }
 
-  return { token, loadToken, setToken, clearToken, request, download }
+  return { token, loadToken, setToken, clearToken, login, logout, request, download }
 }

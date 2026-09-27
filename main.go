@@ -22,18 +22,24 @@ import (
 // version is overridden at link time by buildrelease.sh (-X main.version=…).
 var version = "dev"
 
-// printAdminBanner makes the admin token easy to spot in the terminal. The
-// plaintext token is printed by default so an operator can log in immediately;
-// set LIAPI_MASK_ADMIN_TOKEN=1 to print only a masked form (shared/remote
-// terminals, screen recordings, etc.).
+// printAdminBanner surfaces how to log in to the admin UI. The login account
+// is username/password; on first run the generated password is shown once here
+// (it is never stored in plaintext). The static admin token is also printed as
+// a fallback credential for /metrics and automation.
 func printAdminBanner(cfg *config.Config, configPath string) {
 	token := cfg.AdminToken
 	if os.Getenv("LIAPI_MASK_ADMIN_TOKEN") == "1" {
 		token = common.MaskToken(cfg.AdminToken) + "  (masked; see " + configPath + ")"
 	}
+	pw := "(unchanged — set via 管理台 配置页)"
+	if cfg.FirstRunPassword != "" {
+		pw = cfg.FirstRunPassword + "  (首次生成，仅显示这一次)"
+	} else if os.Getenv("LIAPI_MASK_ADMIN_TOKEN") == "1" {
+		pw = "(masked; reset via config)"
+	}
 	const bar = "════════════════════════════════════════════════════════════════"
-	log.Printf("\n%s\n  Liapi 管理台  http://<host>%s/\n\n  Admin Token :  %s\n\n  登录入口    http://<host>%s/\n  提示        终端会显示明文，设为 LIAPI_MASK_ADMIN_TOKEN=1 可隐藏\n%s",
-		bar, cfg.Addr, token, cfg.Addr, bar)
+	log.Printf("\n%s\n  Liapi 管理台  http://<host>%s/\n\n  登录入口    http://<host>%s/\n  用户名      %s\n  密码        %s\n\n  Admin Token :  %s\n  （Token 仅用于 /metrics 与脚本；日常登录用用户名+密码）\n%s",
+		bar, cfg.Addr, cfg.Addr, cfg.AdminUsername, pw, token, bar)
 }
 
 func main() {
@@ -58,6 +64,7 @@ func main() {
 
 	log.Printf("config loaded from %s", *configPath)
 	printAdminBanner(cfg, *configPath)
+	cfg.FirstRunPassword = ""
 
 	logger, err := stats.NewLogger(cfg.LogFile, cfg.RingSize, cfg.LogMaxBytes)
 	if err != nil {

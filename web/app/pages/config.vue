@@ -110,6 +110,7 @@ function onFile(e: Event, format: 'liapi' | 'oneapi') {
       <p class="mb-3 text-xs text-muted-foreground">
         「重新加载」拉取的配置中密钥已脱敏，保存时脱敏值会自动还原为原密钥。
         「导出 JSON」包含完整密钥（含 admin_token / api_key），请妥善保管。
+        管理台登录账号为 admin_username + 密码（admin_password_hash 存 PBKDF2 哈希，不可回读）。
         OneAPI 导入仅替换 upstreams 列表，其余配置保持不变。
       </p>
       <Textarea

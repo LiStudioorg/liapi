@@ -42,7 +42,7 @@ onMounted(() => {
       </div>
 
       <p class="mt-6 text-center text-[11px] text-muted-foreground">
-        admin token 仅保存在本机浏览器，不会上传
+        登录会话仅保存在本机浏览器，不会上传
       </p>
     </div>
   </div>

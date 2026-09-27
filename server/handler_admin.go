@@ -87,6 +87,80 @@ func contentTypeFor(path string) string {
 	}
 }
 
+// adminLogin exchanges username/password for a short-lived session token.
+// It is not wrapped in requireAdmin (there is no session yet) but still
+// enforces the IP allowlist, per-IP lockout and rate limit so the login form
+// cannot be brute-forced.
+func (s *Server) adminLogin(w http.ResponseWriter, r *http.Request) {
+	cfg := s.holder.Get()
+	ip := clientIP(r)
+	audit := func(ok bool, reason string) {
+		s.audit.Add(stats.AuditEvent{
+			IP: ip, Method: r.Method, Path: r.URL.Path, OK: ok, Reason: reason,
+		})
+	}
+	if !ipAllowed(ip, cfg.AdminAllowIPs) {
+		s.metrics.IncAdminDenied()
+		audit(false, "ip_forbidden")
+		common.WriteError(w, http.StatusForbidden, "ip not allowed", "permission_error", "ip_forbidden")
+		return
+	}
+	if locked, until := s.adminAuth.Locked(ip); locked {
+		s.metrics.IncAdminLocked()
+		audit(false, "locked_out")
+		common.WriteError(w, http.StatusTooManyRequests,
+			"account temporarily locked after repeated failures ("+until.Round(time.Second).String()+" left)",
+			"rate_limit_error", "admin_locked")
+		return
+	}
+	if !s.adminLimit.Allow("ip:" + ip) {
+		s.metrics.IncAdminDenied()
+		audit(false, "rate_limited")
+		common.WriteError(w, http.StatusTooManyRequests, "admin rate limit exceeded", "rate_limit_error", "rate_limit_exceeded")
+		return
+	}
+	var req struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+		common.WriteError(w, http.StatusBadRequest, "invalid JSON body", "invalid_request_error", "")
+		return
+	}
+	token, ok := s.adminAuth.Login(req.Username, req.Password)
+	if !ok {
+		s.metrics.IncAdminDenied()
+		lockedNow := s.adminAuth.RecordFailure(ip)
+		if lockedNow {
+			s.metrics.IncAdminLocked()
+			audit(false, "bad_login_locked")
+		} else {
+			audit(false, "bad_login")
+		}
+		common.WriteError(w, http.StatusUnauthorized, "invalid username or password", "invalid_request_error", "invalid_credentials")
+		return
+	}
+	s.adminAuth.ClearFailures(ip)
+	audit(true, "")
+	common.WriteJSON(w, http.StatusOK, map[string]string{
+		"token":    token,
+		"username": req.Username,
+	})
+}
+
+// adminLogout invalidates the caller's session token.
+func (s *Server) adminLogout(w http.ResponseWriter, r *http.Request) {
+	if t := s.adminAuth.Credential(r); t != "" {
+		s.adminAuth.Logout(t)
+	}
+	common.WriteJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+// adminMe reports the identity behind the current credential.
+func (s *Server) adminMe(w http.ResponseWriter, r *http.Request) {
+	common.WriteJSON(w, http.StatusOK, map[string]string{"username": s.holder.Get().AdminUsername})
+}
+
 func (s *Server) adminOverview(w http.ResponseWriter, r *http.Request) {
 	snap := s.totals.Snapshot()
 	cfg := s.holder.Get()
@@ -651,6 +725,9 @@ func (s *Server) adminGetConfig(w http.ResponseWriter, r *http.Request) {
 	if cfg.AdminToken != "" {
 		cfg.AdminToken = common.MaskToken(cfg.AdminToken)
 	}
+	if cfg.AdminPasswordHash != "" {
+		cfg.AdminPasswordHash = common.MaskToken(cfg.AdminPasswordHash)
+	}
 	for i := range cfg.ClientTokens {
 		cfg.ClientTokens[i] = common.MaskToken(cfg.ClientTokens[i])
 	}
@@ -818,6 +895,9 @@ func resolveMaskedSecrets(old, next *config.Config) {
 
 	if isMasked(next.AdminToken) {
 		next.AdminToken = old.AdminToken
+	}
+	if isMasked(next.AdminPasswordHash) {
+		next.AdminPasswordHash = old.AdminPasswordHash
 	}
 
 	oldUps := make(map[string]string, len(old.Upstreams))

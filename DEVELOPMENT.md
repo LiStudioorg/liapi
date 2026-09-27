@@ -124,10 +124,11 @@ liapi/
 ├── common/
 │   ├── errors.go             # OpenAI 错误格式 {"error":{...}} 与写出
 │   ├── token.go              # 常量时间比较 / SHA-256 / 脱敏
+│   ├── password.go           # PBKDF2-HMAC-SHA256 密码哈希/校验（管理台登录）
 │   └── token_test.go
 ├── auth/
 │   ├── auth.go               # 客户端 token / 设备 token 校验
-│   ├── admin.go              # 管理 token 校验 + 每 IP 失败锁定
+│   ├── admin.go              # 管理登录（用户名+密码→会话）/ admin token 校验 + 每 IP 失败锁定
 │   └── auth_test.go
 ├── routing/
 │   ├── router.go             # 别名解析 + 候选收集 + fallback/strategy/group/健康过滤
@@ -140,9 +141,9 @@ liapi/
 │   ├── http.go               # 头透传、响应头清洗、尾缓冲
 │   └── {relay,retry}_test.go
 ├── server/
-│   ├── server.go             # ServeMux 路由注册 + admin 中间件（IP/锁定/限流/token）
+│   ├── server.go             # ServeMux 路由注册 + admin 中间件（IP/锁定/限流/会话或token）
 │   ├── handler_v1.go         # /v1/* 业务实现
-│   ├── handler_admin.go      # /admin/api/* 实现 + SPA 静态托管
+│   ├── handler_admin.go      # /admin/api/* 实现（含 login/logout/me）+ SPA 静态托管
 │   ├── requestid.go          # X-Request-ID 中间件
 │   ├── adminui/              # 管理台构建产物（go:embed all:adminui），勿手改
 │   └── {server,policy,failover,adminui,helpers}_test.go
@@ -240,15 +241,16 @@ RequestID 中间件（生成/回显 X-Request-ID）
 ## 5. 配置与热重载
 
 - 全部配置由管理台（`http://<host>:8787/`）编辑，保存即热重载。
-- `config.json` 只作首次引导（自动生成、含随机 `admin_token`），权限强制 `0600`；
+- `config.json` 只作首次引导（自动生成、含随机 `admin_token` 与随机管理账号密码），权限强制 `0600`；
   Windows 跳过权限校验，可用 `LIAPI_SKIP_PERM_CHECK=1` 临时绕过。
 - 保存流程（`config.Save`）：临时文件 → `fsync` → `os.Rename` 原子替换 → 再次 `chmod 0600`。
 - 热重载：`Holder.Set(newCfg)`；所有请求**每次现取** `holder.Get()`，不缓存。
 - 管理台是 Nuxt 生成的静态 SPA，产物位于 `server/adminui/`，由
   `server/server.go` 的 `//go:embed all:adminui` 打包进二进制；
   `handler_admin.go` 的 `adminUI` 负责静态资源 + SPA 回退（未知 GET 路径 → `index.html`）。
-- 启动时 `main.go` 的 `printAdminBanner` 会以醒目方框打印 **admin token 明文**与
-  管理台地址，方便直接登录；设 `LIAPI_MASK_ADMIN_TOKEN=1` 可只打印脱敏值
+- 启动时 `main.go` 的 `printAdminBanner` 会以醒目方框打印 **管理台登录用户名**、
+  **首次生成的密码明文**（仅首次启动出现，之后不再显示）以及 `admin_token`（供 /metrics 与脚本），
+  方便直接登录；设 `LIAPI_MASK_ADMIN_TOKEN=1` 可只打印脱敏值
   （共享/远程终端、录屏等场景）。
 
 ---
@@ -257,15 +259,17 @@ RequestID 中间件（生成/回显 X-Request-ID）
 
 1. **永不记录密钥**：token 用 `common.MaskToken` 脱敏；`api_key` 一律不入日志。
    设备 token 只存 SHA-256（`token_hash`），明文仅在创建/轮换时返回一次。
-2. **常量时间比较**：token 校验用 SHA-256 摘要 + `subtle.ConstantTimeCompare`。
+   管理台密码只存 PBKDF2-HMAC-SHA256 加盐哈希（`admin_password_hash`），明文仅在首次生成时打印一次。
+2. **常量时间比较**：token 校验用 SHA-256 摘要 + `subtle.ConstantTimeCompare`；
+   密码校验用 PBKDF2 派生 + `subtle.ConstantTimeCompare`。
 3. **管理面三层防护**：IP 白名单（`admin_allow_ips`）→ 每 IP 失败锁定 → 每 IP 限流
-   （`admin_rate_per_minute`）→ admin token。每次尝试写入审计环。
+   （`admin_rate_per_minute`）→ 登录会话（用户名+密码）或 admin token。每次尝试写入审计环。
 4. **X-Forwarded-For 仅在配置白名单时信任**（防伪造）。
 5. 日志文件 `0600`；配置文件 `0600`。
-6. 前端 admin token 仅存浏览器 `localStorage`，随请求以 `Authorization: Bearer` 发送；
-   不得写入仓库或日志。登录/更换 token 一律走 `/login` 页面，禁止用 `window.prompt`
+6. 前端登录会话 token 仅存浏览器 `localStorage`，随请求以 `Authorization: Bearer` 发送；
+   不得写入仓库或日志。登录/退出一律走 `/login` 页面，禁止用 `window.prompt`
    等浏览器对话框收集密钥。
-7. 终端打印明文 admin token 属便利性取舍：默认开启，可用 `LIAPI_MASK_ADMIN_TOKEN=1`
+7. 终端打印首次生成的明文密码属便利性取舍（仅首次启动），可用 `LIAPI_MASK_ADMIN_TOKEN=1`
    关闭；生产环境若会把 stdout 接入共享日志，应设为 `1`。
 
 ---
@@ -278,11 +282,12 @@ cd liapi
 git checkout beta              # 铁律：工作在 beta 分支
 go test ./...
 go build -o liapi .
-./liapi -config config.json    # 首次运行生成 config.json（0600），并在终端醒目打印 admin_token
+./liapi -config config.json    # 首次运行生成 config.json（0600），终端醒目打印管理账号密码与 admin_token
 ```
 
-> 启动后终端会出现一个方框，其中 `Admin Token` 一行为明文，直接复制即可登录
-> `http://<host>:8787/`。如需隐藏：`LIAPI_MASK_ADMIN_TOKEN=1 ./liapi -config config.json`。
+> 启动后终端会出现一个方框，其中 `用户名` / `密码` 为管理台登录凭据（密码仅首次生成时显示），
+> 直接用于登录 `http://<host>:8787/`。`Admin Token` 单独列出，仅供 `/metrics` 与脚本。
+> 如需隐藏明文：`LIAPI_MASK_ADMIN_TOKEN=1 ./liapi -config config.json`。
 
 冒烟：
 
@@ -313,13 +318,14 @@ config.Load → Holder → stats.NewLogger / NewLimiter / NewTotals
 - 布局参考 NewApi：左侧固定侧边栏 + 顶栏，页面切换带过渡动画
   （`pageTransition`，`mode: out-in`）。
 - **登录**：`app/pages/login.vue` 是独立的登录页，配 `layouts/auth.vue`（居中品牌布局）。
-  - 未认证（`localStorage` 无 token）访问任意页面 → 自动跳转 `/login?redirect=<原路径>`。
-  - 登录时先以 token 调用 `/overview` 校验，成功才写入 `localStorage`（错误 token
-    不会覆盖已有的好 token），再回跳 `redirect`；登录页提供显示/隐藏切换。
+  - 输入**用户名 + 密码**，调用 `/admin/api/login` 换取短期会话 token（`sess-…`）。
+  - 未认证（`localStorage` 无会话 token）访问任意页面 → 自动跳转 `/login?redirect=<原路径>`。
+  - 登录成功才写入 `localStorage`（错误凭据不会覆盖已有会话），再回跳 `redirect`；密码框提供显示/隐藏切换。
   - 任意接口返回 401 → `useUi.handleError` 清除无效态并跳转 `/login`。
+  - 退出登录调用 `/admin/api/logout` 使服务端会话失效后再清除本地 token。
   - **禁止**使用 `window.prompt` / `window.confirm` 等浏览器对话框收集或确认密钥。
-- API 客户端：`app/composables/useApi.ts`——admin token 存 `localStorage`，
-  请求带 `Authorization: Bearer <admin_token>`；`setToken('')` 即登出。
+- API 客户端：`app/composables/useApi.ts`——会话 token 存 `localStorage`，
+  请求带 `Authorization: Bearer <session>`；`login()` 换 token、`logout()` 服务端失效并登出。
 - 类型契约：`app/types/api.ts`，字段须与 `server/handler_admin.go` 保持一致。
 - 开发代理：`nuxt.config.ts` 的 `nitro.devProxy` 已把 `/admin/api`、`/v1`、`/metrics`
   转发到本地 `127.0.0.1:8787`，可先起 Go 服务再 `npm run dev`。
@@ -424,6 +430,8 @@ git push origin beta          # 只推 beta
 - 新增/变更字段：同步更新 `config/config.go` 的 struct 与 `Validate()`，
   并在 `README.md` 字段表补充说明与迁移影响。
 - 若字段出现在管理台表单：同步更新 `web/app/types/api.ts` 与对应页面组件。
+- 密钥类字段需在 `server/handler_admin.go` 的 `adminGetConfig` 脱敏、在
+  `resolveMaskedSecrets` 还原（如 `admin_password_hash` 已在两处处理）。
 - 未讨论不得改动 `go` directive。
 - 保持零第三方依赖（Go 侧）；确需功能时优先在树内实现。
 

@@ -141,6 +141,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /admin/", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/", http.StatusMovedPermanently)
 	})
+	mux.HandleFunc("POST /admin/api/login", s.adminLogin)
+	mux.HandleFunc("POST /admin/api/logout", s.requireAdmin(s.adminLogout))
+	mux.HandleFunc("GET /admin/api/me", s.requireAdmin(s.adminMe))
 	mux.HandleFunc("GET /admin/api/overview", s.requireAdmin(s.adminOverview))
 	mux.HandleFunc("GET /admin/api/upstreams", s.requireAdmin(s.adminListUpstreams))
 	mux.HandleFunc("POST /admin/api/upstreams", s.requireAdmin(s.adminAddUpstream))

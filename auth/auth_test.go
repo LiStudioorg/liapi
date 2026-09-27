@@ -3,6 +3,7 @@ package auth
 import (
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"liapi/common"
 	"liapi/config"
@@ -90,5 +91,82 @@ func TestHashEqual(t *testing.T) {
 	}
 	if common.HashEqual("secret2", h) {
 		t.Fatal("mismatching hash")
+	}
+}
+
+func TestAdminLoginAndSession(t *testing.T) {
+	hash, err := common.HashPassword("hunter2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{
+		AdminToken:        "adm-static-token",
+		AdminUsername:     "alice",
+		AdminPasswordHash: hash,
+	}
+	cfg.SetDefaults()
+	cfg.AdminToken = "adm-static-token"
+	cfg.AdminUsername = "alice"
+	cfg.AdminPasswordHash = hash
+	h := config.NewHolder(cfg)
+	a := NewAdmin(h)
+
+	// Wrong password / username rejected.
+	if _, ok := a.Login("alice", "nope"); ok {
+		t.Fatal("wrong password must fail")
+	}
+	if _, ok := a.Login("bob", "hunter2"); ok {
+		t.Fatal("wrong username must fail")
+	}
+
+	// Correct credentials issue a session token that authenticates.
+	tok, ok := a.Login("alice", "hunter2")
+	if !ok || tok == "" {
+		t.Fatal("valid login should issue a token")
+	}
+	r := httptest.NewRequest("GET", "/admin/api/overview", nil)
+	r.Header.Set("Authorization", "Bearer "+tok)
+	if !a.Authenticate(r) {
+		t.Fatal("session token should authenticate")
+	}
+
+	// Static admin token still works (for /metrics and scripts).
+	r2 := httptest.NewRequest("GET", "/metrics", nil)
+	r2.Header.Set("x-admin-token", "adm-static-token")
+	if !a.Authenticate(r2) {
+		t.Fatal("static admin token should still authenticate")
+	}
+
+	// Unknown/garbage token rejected.
+	r3 := httptest.NewRequest("GET", "/x", nil)
+	r3.Header.Set("Authorization", "Bearer sess-garbage")
+	if a.Authenticate(r3) {
+		t.Fatal("unknown session token must fail")
+	}
+
+	// Logout invalidates the session.
+	a.Logout(tok)
+	if a.Authenticate(r) {
+		t.Fatal("logged-out session must fail")
+	}
+}
+
+func TestAdminSessionExpiry(t *testing.T) {
+	hash, _ := common.HashPassword("pw")
+	cfg := &config.Config{AdminUsername: "u", AdminPasswordHash: hash}
+	cfg.SetDefaults()
+	cfg.AdminUsername = "u"
+	cfg.AdminPasswordHash = hash
+	a := NewAdmin(config.NewHolder(cfg))
+	a.SetSessionTTL(time.Nanosecond)
+	tok, ok := a.Login("u", "pw")
+	if !ok {
+		t.Fatal("login should succeed")
+	}
+	time.Sleep(2 * time.Millisecond)
+	r := httptest.NewRequest("GET", "/x", nil)
+	r.Header.Set("Authorization", "Bearer "+tok)
+	if a.Authenticate(r) {
+		t.Fatal("expired session must fail")
 	}
 }

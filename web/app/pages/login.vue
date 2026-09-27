@@ -1,21 +1,22 @@
 <script setup lang="ts">
 import { Button, Input } from 'fuxsto-design'
-import { KeyRound, Loader2, Eye, EyeOff, LogIn, TriangleAlert } from 'lucide-vue-next'
+import { User, Loader2, Eye, EyeOff, LogIn, TriangleAlert, KeyRound } from 'lucide-vue-next'
 import { useApi } from '~/composables/useApi'
 
 definePageMeta({ layout: 'auth' })
 
-const { token, setToken, loadToken, request } = useApi()
+const { login } = useApi()
 const route = useRoute()
 
-const value = ref('')
+const username = ref('')
+const password = ref('')
 const show = ref(false)
 const busy = ref(false)
 const error = ref('')
 
 onMounted(() => {
-  loadToken()
-  value.value = token.value
+  // Prefill the username only; never store/echo the password.
+  username.value = localStorage.getItem('liapi_admin_username') || ''
 })
 
 function targetPath(): string {
@@ -29,26 +30,18 @@ function targetPath(): string {
 
 async function submit() {
   error.value = ''
-  const t = value.value.trim()
-  if (!t) {
-    error.value = '请输入 admin token'
+  const u = username.value.trim()
+  if (!u || !password.value) {
+    error.value = '请输入用户名和密码'
     return
   }
   busy.value = true
-  // Validate before storing so a wrong token never overwrites a good one.
-  const prev = token.value
-  setToken(t)
   try {
-    await request('/overview')
+    await login(u, password.value)
+    localStorage.setItem('liapi_admin_username', u)
     await navigateTo(targetPath(), { replace: true })
   } catch (e) {
-    const err = e as Error & { unauthorized?: boolean }
-    if (err.unauthorized) {
-      setToken(prev)
-      error.value = 'admin token 不正确或已失效'
-    } else {
-      error.value = err.message || '登录失败'
-    }
+    error.value = (e as Error).message || '登录失败'
   } finally {
     busy.value = false
   }
@@ -58,17 +51,35 @@ async function submit() {
 <template>
   <form class="space-y-4" @submit.prevent="submit">
     <div class="space-y-1.5">
-      <label class="text-xs font-medium text-muted-foreground">Admin Token</label>
+      <label class="text-xs font-medium text-muted-foreground">用户名</label>
+      <div class="relative">
+        <User
+          :size="15"
+          class="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground"
+        />
+        <Input
+          v-model="username"
+          type="text"
+          placeholder="admin"
+          autofocus
+          autocomplete="username"
+          class="pl-9"
+          @keydown.enter.prevent="submit"
+        />
+      </div>
+    </div>
+
+    <div class="space-y-1.5">
+      <label class="text-xs font-medium text-muted-foreground">密码</label>
       <div class="relative">
         <KeyRound
           :size="15"
           class="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground"
         />
         <Input
-          v-model="value"
+          v-model="password"
           :type="show ? 'text' : 'password'"
-          placeholder="adm-..."
-          autofocus
+          placeholder="••••••••"
           autocomplete="current-password"
           class="pl-9 pr-9"
           @keydown.enter.prevent="submit"
@@ -100,7 +111,7 @@ async function submit() {
         :size="16"
         :class="busy ? 'animate-spin' : ''"
       />
-      {{ busy ? '验证中…' : '登录' }}
+      {{ busy ? '登录中…' : '登录' }}
     </Button>
   </form>
 </template>

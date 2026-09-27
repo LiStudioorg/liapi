@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"liapi/auth"
+	"liapi/common"
 	"liapi/config"
 	"liapi/relay"
 	"liapi/routing"
@@ -369,5 +370,61 @@ func TestConfigExportEndpoint(t *testing.T) {
 	rec2 := do(h, "POST", "/admin/api/config/import", adminTok, rec.Body.String())
 	if rec2.Code != http.StatusOK {
 		t.Fatalf("reimport: %d %s", rec2.Code, rec2.Body.String())
+	}
+}
+
+func TestAdminLoginFlow(t *testing.T) {
+	const username = "root"
+	const password = "sup3r-secret"
+	srv, holder := newTestServer(t, nil)
+	// Seed a known password on the live config.
+	hash, err := common.HashPassword(password)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cur := holder.Get().Clone()
+	cur.AdminUsername = username
+	cur.AdminPasswordHash = hash
+	holder.Set(cur)
+	h := srv.Handler()
+
+	// Wrong password → 401.
+	rec := do(h, "POST", "/admin/api/login", "", `{"username":"root","password":"nope"}`)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("bad login want 401, got %d", rec.Code)
+	}
+
+	// Correct password → session token.
+	rec = do(h, "POST", "/admin/api/login", "", `{"username":"root","password":"sup3r-secret"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("login want 200, got %d %s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil || out.Token == "" {
+		t.Fatalf("login response: %s", rec.Body.String())
+	}
+
+	// Session token authorizes admin API.
+	rec = do(h, "GET", "/admin/api/me", out.Token, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("session auth want 200, got %d", rec.Code)
+	}
+
+	// Logout invalidates it.
+	rec = do(h, "POST", "/admin/api/logout", out.Token, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("logout want 200, got %d", rec.Code)
+	}
+	rec = do(h, "GET", "/admin/api/me", out.Token, "")
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("post-logout want 401, got %d", rec.Code)
+	}
+
+	// Static admin token still works for automation.
+	rec = do(h, "GET", "/admin/api/me", adminTok, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("static token want 200, got %d", rec.Code)
 	}
 }

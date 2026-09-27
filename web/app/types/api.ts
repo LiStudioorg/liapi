@@ -201,6 +201,8 @@ export interface Config {
   health_state_file: string
   skip_unhealthy: boolean
   admin_token: string
+  admin_username: string
+  admin_password_hash: string
   admin_rate_per_minute: number
   admin_allow_ips: string[]
   metrics_token: string

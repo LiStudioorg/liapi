@@ -140,6 +140,8 @@ type Config struct {
 	HealthStateFile    string                 `json:"health_state_file"`
 	SkipUnhealthy      bool                   `json:"skip_unhealthy"`
 	AdminToken         string                 `json:"admin_token"`
+	AdminUsername      string                 `json:"admin_username"`
+	AdminPasswordHash  string                 `json:"admin_password_hash"`
 	AdminRatePerMinute int                    `json:"admin_rate_per_minute"`
 	AdminAllowIPs      []string               `json:"admin_allow_ips"`
 	MetricsToken       string                 `json:"metrics_token"`
@@ -159,6 +161,11 @@ type Config struct {
 	RetryOnTimeout     bool                   `json:"retry_on_timeout"`
 	Upstreams          []Upstream             `json:"upstreams"`
 	Devices            []Device               `json:"devices"`
+
+	// FirstRunPassword carries a freshly generated admin password in cleartext
+	// for one startup only (printed in the terminal banner). It is never
+	// persisted: json:"-" and cleared by main.go after printing.
+	FirstRunPassword string `json:"-"`
 }
 
 func (c *Config) SetDefaults() {
@@ -264,6 +271,24 @@ func (c *Config) Validate() error {
 
 	if c.AdminToken == "" {
 		c.AdminToken = common.RandomToken("adm-")
+	}
+	if strings.TrimSpace(c.AdminUsername) == "" {
+		c.AdminUsername = "admin"
+	}
+	// First run: seed admin login credentials. The plaintext password is
+	// surfaced once via FirstRunPassword (printed by main.go), then discarded.
+	if c.AdminPasswordHash == "" {
+		pw := common.RandomPassword()
+		hash, err := common.HashPassword(pw)
+		if err != nil {
+			return fmt.Errorf("generate admin password: %w", err)
+		}
+		c.AdminPasswordHash = hash
+		c.FirstRunPassword = pw
+	} else if !common.IsPasswordHash(c.AdminPasswordHash) && !strings.Contains(c.AdminPasswordHash, "...") {
+		// Masked placeholders (e.g. "admi...hash") are restored by the server
+		// after validation; only genuinely malformed values are rejected.
+		return errors.New("admin_password_hash: malformed (expected pbkdf2-sha256$...)")
 	}
 	if c.RateLimitPerMinute < 0 {
 		return errors.New("rate_limit_per_minute must be >= 0")

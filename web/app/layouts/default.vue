@@ -18,7 +18,7 @@ import {
   Gauge,
 } from 'lucide-vue-next'
 
-const { token, loadToken, clearToken } = useApi()
+const { token, loadToken, logout } = useApi()
 const route = useRoute()
 const router = useRouter()
 
@@ -116,7 +116,7 @@ const activeLabel = computed(
       <div class="border-t border-border p-3">
         <button
           class="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-          @click="clearToken(); goLogin()"
+          @click="logout().then(goLogin)"
         >
           <LogOut :size="16" />
           <span>退出登录</span>
@@ -159,7 +159,7 @@ const activeLabel = computed(
           </button>
           <button
             class="flex items-center gap-2 rounded-lg border border-border px-3 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-            :title="token ? '切换 / 更新 token' : '登录'"
+            :title="token ? '切换账号' : '登录'"
             @click="goLogin"
           >
             <CircleUser :size="15" />
