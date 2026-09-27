@@ -116,6 +116,17 @@ jobs:
           echo "共 $(ls | wc -l) 个文件"
           ls -lh
 
+      # The rolling tag keeps one release; drop previous assets so the
+      # release always reflects only the newest successful build.
+      - name: Clean previous release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view beta-latest --json assets \
+            --jq '.assets[].name' 2>/dev/null | while read -r name; do
+            [ -n "$name" ] && gh release delete-asset beta-latest "$name" -y || true
+          done
+
       - name: Publish beta release
         uses: softprops/action-gh-release@v2
         with:
