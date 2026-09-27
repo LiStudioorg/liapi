@@ -9,6 +9,25 @@ permissions:
   contents: write
 
 jobs:
+  # ── 0. 构建管理台 SPA（go:embed 依赖它）────────────────
+  build-frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm ci
+      - run: npm run build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: adminui
+          path: server/adminui
+          if-no-files-found: error
+
   # ── 1. 枚举平台，分流到 Linux / macOS runner ─────────
   list-targets:
     runs-on: ubuntu-latest
@@ -34,7 +53,7 @@ jobs:
 
   # ── 2a. Linux runner ─────────────────────────────────
   build-linux:
-    needs: list-targets
+    needs: [list-targets, build-frontend]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -47,6 +66,12 @@ jobs:
         with:
           go-version: stable
           cache: false
+
+      - name: Use freshly built admin UI
+        uses: actions/download-artifact@v4
+        with:
+          name: adminui
+          path: server/adminui
 
       # ★ 只在 Android 平台启用 NDK 缓存
       - name: Cache Android NDK
@@ -74,7 +99,7 @@ jobs:
 
   # ── 2b. macOS runner（仅 iOS）─────────────────────────
   build-macos:
-    needs: list-targets
+    needs: [list-targets, build-frontend]
     runs-on: macos-latest
     strategy:
       fail-fast: false
@@ -87,6 +112,12 @@ jobs:
         with:
           go-version: stable
           cache: false
+
+      - name: Use freshly built admin UI
+        uses: actions/download-artifact@v4
+        with:
+          name: adminui
+          path: server/adminui
 
       - name: Build
         continue-on-error: true

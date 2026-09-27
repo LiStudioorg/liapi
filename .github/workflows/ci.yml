@@ -6,8 +6,38 @@ on:
   pull_request:
 
 jobs:
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build admin SPA
+        run: npm run build
+
+      # Hand the freshly built assets to the Go job so embedding is verified
+      # against current sources (the committed copy is only a fallback).
+      - uses: actions/upload-artifact@v4
+        with:
+          name: adminui
+          path: server/adminui
+          if-no-files-found: error
+
   test:
     runs-on: ubuntu-latest
+    needs: frontend
     steps:
       - uses: actions/checkout@v4
 
@@ -15,6 +45,12 @@ jobs:
         with:
           go-version: 'stable'
           cache: true
+
+      - name: Use freshly built admin UI
+        uses: actions/download-artifact@v4
+        with:
+          name: adminui
+          path: server/adminui
 
       - name: Format check
         run: |

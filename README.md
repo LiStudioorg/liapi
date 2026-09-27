@@ -374,7 +374,7 @@ return failAll(lastErr)                       # 502 或透传最后一次的 sta
 
 | 路径 | 方法 | 说明 |
 |---|---|---|
-| `/` | GET | 管理台单页（go:embed，含设备/统计/配置编辑）；`/admin` 301 → `/` |
+| `/` | GET | 管理台 SPA（Nuxt 静态构建，go:embed；含设备/统计/配置编辑）；`/admin` 301 → `/` |
 | `/admin/api/overview` | GET | 请求数 / 成功率 / 平均延迟 / token 量 / 费用 / 故障转移数 |
 | `/admin/api/upstreams` | GET | 上游列表（api_key 脱敏） |
 | `/admin/api/upstreams` | POST | 新增上游 |
@@ -448,6 +448,11 @@ docker build -t liapi . && docker run -p 8787:8787 -v "$PWD/data:/data" liapi
 ### P1-8 管理台
 
 单 HTML（CSS+JS 内联），`go:embed` 进二进制，零构建。Tabs：概览 / 上游 / 令牌 / 日志 / 调试 / 健康。
+
+> **v2**：管理台已重写为 Nuxt 4 + fuxsto-design 的静态 SPA（源码在 `web/`，
+> 产物在 `server/adminui/`，`go:embed all:adminui` 打包；构建见 `./buildadmin.sh`）。
+> 布局参考 NewApi（侧边栏 + 顶栏 + 页面过渡动画），功能覆盖概览 / 上游 / 令牌 /
+> 设备 / 统计 / 日志 / 健康 / 配置 / 调试。
 
 ### P1-9 配置热重载
 
@@ -556,7 +561,8 @@ config/holder.go            server/server.go          relay/relay.go
 auth/auth.go                stats/logger.go           relay/stream.go
 auth/admin.go               stats/limiter.go          relay/usage.go
 common/errors.go            stats/health.go           relay/http.go
-common/token.go             stats/totals.go           adminui/index.html
+common/token.go             stats/totals.go           server/adminui/ (SPA)
+                                                      web/ (Nuxt 源码)
 ```
 
 ---

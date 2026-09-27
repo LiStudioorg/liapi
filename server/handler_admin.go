@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	pathpkg "path"
 	"strconv"
 	"strings"
 	"time"
@@ -17,6 +18,20 @@ import (
 )
 
 func (s *Server) adminUI(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(r.URL.Path, "/")
+	if path == "" {
+		path = "index.html"
+	}
+
+	// Serve the exact asset when it exists in the embedded FS.
+	if data, err := ui.ReadFile("adminui/" + path); err == nil {
+		writeEmbedded(w, path, data)
+		return
+	}
+
+	// SPA fallback: unknown paths are client-side routes → index.html.
+	// (Static asset paths like /_nuxt/*.js should never reach here, but if a
+	// hashed asset is missing, falling back to HTML keeps the app booting.)
 	data, err := ui.ReadFile("adminui/index.html")
 	if err != nil {
 		http.Error(w, "admin ui not embedded", http.StatusInternalServerError)
@@ -25,6 +40,51 @@ func (s *Server) adminUI(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	_, _ = w.Write(data)
+}
+
+// writeEmbedded serves an embedded asset with an appropriate content type and
+// aggressive caching for immutable hashed assets under /_nuxt/.
+func writeEmbedded(w http.ResponseWriter, path string, data []byte) {
+	switch {
+	case strings.HasPrefix(path, "_nuxt/"):
+		// Hashed filenames — safe to cache forever.
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	default:
+		w.Header().Set("Cache-Control", "no-store")
+	}
+	w.Header().Set("Content-Type", contentTypeFor(path))
+	_, _ = w.Write(data)
+}
+
+// contentTypeFor maps a filename extension to a MIME type for the handful of
+// asset kinds produced by the Nuxt build.
+func contentTypeFor(path string) string {
+	switch strings.ToLower(pathpkg.Ext(path)) {
+	case ".html":
+		return "text/html; charset=utf-8"
+	case ".js", ".mjs":
+		return "text/javascript; charset=utf-8"
+	case ".css":
+		return "text/css; charset=utf-8"
+	case ".json":
+		return "application/json; charset=utf-8"
+	case ".svg":
+		return "image/svg+xml"
+	case ".png":
+		return "image/png"
+	case ".jpg", ".jpeg":
+		return "image/jpeg"
+	case ".ico":
+		return "image/x-icon"
+	case ".woff":
+		return "font/woff"
+	case ".woff2":
+		return "font/woff2"
+	case ".map":
+		return "application/json; charset=utf-8"
+	default:
+		return "application/octet-stream"
+	}
 }
 
 func (s *Server) adminOverview(w http.ResponseWriter, r *http.Request) {

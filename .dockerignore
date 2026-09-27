@@ -8,3 +8,6 @@ liapi
 liapi.exe
 SECURITY.md
 CONTRIBUTING.md
+web/node_modules
+web/.nuxt
+web/.output
