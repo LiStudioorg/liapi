@@ -71,8 +71,9 @@ jobs:
       - name: Build
         run: go build ./...
 
-  # ── 自动预发布：仅当 beta 分支上 CI 全绿时触发 ─────────
-  # 固定 tag `beta-latest`，每次成功都覆盖为该提交的构建产物。
+  # ── 自动发布：仅当 beta 分支上 CI 全绿时触发 ───────────
+  # 固定 tag `beta-latest`，每次成功都覆盖为该提交的构建产物；
+  # 作为正式 Release 发布（非 prerelease）。
   # 注意：不依赖 workflow_run（那要求工作流先在默认分支 main 上存在）。
   publish:
     needs: [frontend, test]
@@ -98,8 +99,8 @@ jobs:
           VERSION: beta-${{ github.sha }}
         run: |
           chmod +x buildrelease.sh
-          # Build a practical subset for a beta prerelease (fast, most-used
-          # platforms); full matrix is reserved for tagged releases.
+          # Build a practical subset (fast, most-used platforms); the full
+          # matrix (Android/iOS included) is reserved for tagged releases.
           mkdir -p dist
           ok=0
           for T in linux/amd64 linux/arm64 windows/amd64 windows/arm64 darwin/amd64 darwin/arm64; do
@@ -115,22 +116,23 @@ jobs:
           echo "共 $(ls | wc -l) 个文件"
           ls -lh
 
-      - name: Publish beta prerelease
+      - name: Publish beta release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: beta-latest
           name: Beta build ${{ github.sha }}
           target_commitish: ${{ github.sha }}
-          prerelease: true
+          prerelease: false
           draft: false
+          make_latest: false
           files: dist/*
           generate_release_notes: true
           body: |
-            Automated prerelease from the `beta` branch.
+            Automated release from the `beta` branch.
 
             - Commit: `${{ github.sha }}`
             - Version injected into binaries: `beta-${{ github.sha }}`
             - Built by CI run ${{ github.run_id }}
 
-            ⚠️ Unstable — for testing only. Pull `beta` or wait for a tagged
-            release for production use.
+            ⚠️ Rolling build tracked to the `beta` branch. For production use,
+            prefer a versioned release.
