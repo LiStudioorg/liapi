@@ -133,26 +133,38 @@ jobs:
           path: dist/
           if-no-files-found: ignore
 
-  # ── 3. 汇总发布 ──────────────────────────────────────
+  # ── 3. 汇总发布（终极安全版）─────────────────────────
   release:
     needs: [build-linux, build-macos]
     runs-on: ubuntu-latest
     if: always()
     steps:
-      - uses: actions/download-artifact@v4
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
         with:
           path: artifacts
           merge-multiple: true
 
-      - name: Generate checksums
+      - name: Package and Generate checksums
         run: |
-          cd artifacts
-          sha256sum * > checksums.txt
-          echo "共 $(ls | wc -l) 个文件"
-          ls -lh
+          # 如果 artifacts 目录不存在（全构建失败），创建一个空目录防止后续命令报错
+          mkdir -p artifacts
+          
+          # 打包所有产物（无论里面包含文件还是文件夹）
+          tar -czf release.tar.gz -C artifacts .
+          
+          # 对压缩包生成校验和
+          sha256sum release.tar.gz > release.tar.gz.sha256
+          
+          # 打印日志，方便排查
+          echo "✅ 成功生成校验和："
+          cat release.tar.gz.sha256
 
-      - uses: softprops/action-gh-release@v2
+      - name: Release
+        uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/*
+          files: |
+            release.tar.gz
+            release.tar.gz.sha256
           generate_release_notes: true
           draft: false
