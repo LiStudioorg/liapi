@@ -242,17 +242,20 @@ RequestID 中间件（生成/回显 X-Request-ID）
 ## 5. 配置与热重载
 
 - 全部配置由管理台（`http://<host>:8787/`）编辑，保存即热重载。
-- `config.json` 只作首次引导（自动生成、含随机 `admin_token` 与随机管理账号密码），权限强制 `0600`；
-  Windows 跳过权限校验，可用 `LIAPI_SKIP_PERM_CHECK=1` 临时绕过。
+- 默认数据目录 `~/.li/liapi`（`LIAPI_HOME` 可改）：`config.json`、`relay.jsonl`、
+  `health_state.json` 都在那里；首次启动自动创建目录并写出 `config.json`
+  （含随机 `admin_token`；**不会生成任何账号密码**——`login_enabled` 缺省即关闭）。
+  权限强制 `0600`；Windows 跳过权限校验，可用 `LIAPI_SKIP_PERM_CHECK=1` 临时绕过。
+  监听地址 = `addr` + `port`（`Config.ListenAddr()`；兼容旧 `addr: ":8787"` 写法），
+  **改动需重启**，其余字段热重载。
 - 保存流程（`config.Save`）：临时文件 → `fsync` → `os.Rename` 原子替换 → 再次 `chmod 0600`。
 - 热重载：`Holder.Set(newCfg)`；所有请求**每次现取** `holder.Get()`，不缓存。
 - 管理台是 Nuxt 生成的静态 SPA，产物位于 `server/adminui/`，由
   `server/server.go` 的 `//go:embed all:adminui` 打包进二进制；
   `handler_admin.go` 的 `adminUI` 负责静态资源 + SPA 回退（未知 GET 路径 → `index.html`）。
-- 启动时 `main.go` 的 `printAdminBanner` 会以醒目方框打印 **管理台登录用户名**、
-  **首次生成的密码明文**（仅首次启动出现，之后不再显示）以及 `admin_token`（供 /metrics 与脚本），
-  方便直接登录；设 `LIAPI_MASK_ADMIN_TOKEN=1` 可只打印脱敏值
-  （共享/远程终端、录屏等场景）。
+- 启动时 `main.go` 的 `printAdminBanner` 会以醒目方框打印 **管理台地址**、`admin_token`
+  （开箱登录方式，供 /metrics 与脚本）以及**如何开启用户名/密码登录**的说明；
+  设 `LIAPI_MASK_ADMIN_TOKEN=1` 可只打印脱敏值（共享/远程终端、录屏等场景）。
 - 管理台「配置」页（`web/app/pages/config.vue`）提供**表单 / JSON 双视图**：
   - 表单视图按 Collapse 分组（监听与转发 / 路由与重试 / 健康检查 / 日志 / 管理台与鉴权 /
     别名·降级链·价目 / 告警）编辑各顶层字段；键值型字段（`aliases` / `fallbacks` /
@@ -261,7 +264,10 @@ RequestID 中间件（生成/回显 X-Request-ID）
     因此表单未覆盖的字段（`token_policies` / `token_quotas` / `upstreams` / `devices` 等）原样保留。
   - `upstreams` 与 `devices` 不在此页编辑，分别由「上游」「设备」专页维护。
   - 脱敏密钥（含 `...`）无需手填：服务端 `resolveMaskedSecrets` 会在保存时还原为原值；
-    `admin_password` 留空即保持原密码，填写则更新为新密码。
+    `admin_password` 留空即保持原密码，填写则更新为新密码（服务端 `Validate()` 转哈希）。
+  - 登录开关 `login_enabled`：缺省（字段不存在）= 有密码哈希才开启；显式 `true` 必须已设密码，
+    显式 `false` 一律拒绝密码登录（`admin_token` 不受影响）。登录页经
+    `GET /admin/api/login-info`（免鉴权，只暴露两个布尔值）决定展示密码表单还是 Token 输入框。
 
 ---
 
@@ -269,18 +275,20 @@ RequestID 中间件（生成/回显 X-Request-ID）
 
 1. **永不记录密钥**：token 用 `common.MaskToken` 脱敏；`api_key` 一律不入日志。
    设备 token 只存 SHA-256（`token_hash`），明文仅在创建/轮换时返回一次。
-   管理台密码只存 PBKDF2-HMAC-SHA256 加盐哈希（`admin_password_hash`），明文仅在首次生成时打印一次。
+   管理台密码只存 PBKDF2-HMAC-SHA256 加盐哈希（`admin_password_hash`）；
+   **任何账号密码都不自动生成**，`admin_password` 明文只写不读，`Validate()` 哈希后立即清空，
+   GET/导出永不返回明文或原始哈希。
 2. **常量时间比较**：token 校验用 SHA-256 摘要 + `subtle.ConstantTimeCompare`；
    密码校验用 PBKDF2 派生 + `subtle.ConstantTimeCompare`。
 3. **管理面三层防护**：IP 白名单（`admin_allow_ips`）→ 每 IP 失败锁定 → 每 IP 限流
-   （`admin_rate_per_minute`）→ 登录会话（用户名+密码）或 admin token。每次尝试写入审计环。
-4. **X-Forwarded-For 仅在配置白名单时信任**（防伪造）。
+   （`admin_rate_per_minute`）→ 登录会话（用户名+密码，需 `login_enabled`）或 admin token。每次尝试写入审计环。
+4. **X-Forwarded-For 仅采信可信代理**：直连对端为 loopback 或在 `admin_allow_ips` 白名单内时才读取该头，其余来源伪造 XFF 无效（防绕过 IP 白名单/锁定/限流）。
 5. 日志文件 `0600`；配置文件 `0600`。
 6. 前端登录会话 token 仅存浏览器 `localStorage`，随请求以 `Authorization: Bearer` 发送；
    不得写入仓库或日志。登录/退出一律走 `/login` 页面，禁止用 `window.prompt`
    等浏览器对话框收集密钥。
-7. 终端打印首次生成的明文密码属便利性取舍（仅首次启动），可用 `LIAPI_MASK_ADMIN_TOKEN=1`
-   关闭；生产环境若会把 stdout 接入共享日志，应设为 `1`。
+7. 终端打印的 `admin_token` 是唯一的开箱凭据；生产环境若会把 stdout 接入共享日志，
+   应设 `LIAPI_MASK_ADMIN_TOKEN=1` 只打印脱敏值。
 
 ---
 
@@ -292,11 +300,13 @@ cd liapi
 git checkout beta              # 铁律：工作在 beta 分支
 go test ./...
 go build -o liapi .
-./liapi -config config.json    # 首次运行生成 config.json（0600），终端醒目打印管理账号密码与 admin_token
+./liapi                        # 默认 ~/.li/liapi/config.json（自动生成，0600）
+                               # 终端方框打印管理台地址与 admin_token（不生成账号密码）
 ```
 
-> 启动后终端会出现一个方框，其中 `用户名` / `密码` 为管理台登录凭据（密码仅首次生成时显示），
-> 直接用于登录 `http://<host>:8787/`。`Admin Token` 单独列出，仅供 `/metrics` 与脚本。
+> 启动后终端会出现一个方框，列出管理台地址与 `Admin Token` —— 开箱就用 Token 登录
+> `http://<host>:8787/`。想要用户名+密码：管理台「配置 → 管理台与鉴权」打开登录开关并
+> 设置密码，或直接在配置文件写 `login_enabled` + `admin_username` + `admin_password`（保存时自动转哈希）。
 > 如需隐藏明文：`LIAPI_MASK_ADMIN_TOKEN=1 ./liapi -config config.json`。
 
 冒烟：

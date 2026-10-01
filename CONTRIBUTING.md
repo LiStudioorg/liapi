@@ -15,10 +15,10 @@ git clone https://github.com/LiStudioorg/liapi.git
 cd liapi
 go test ./...
 go build -o liapi .
-./liapi -config config.json   # first run generates config.json (mode 0600)
+./liapi                        # first run creates ~/.li/liapi/config.json (mode 0600)
 ```
 
-Open the admin UI at `http://localhost:8787/` (admin token is printed on first start, masked thereafter — keep the file).
+Open the admin UI at `http://localhost:8787/` and log in with the `admin_token` printed in the startup banner (mask it with `LIAPI_MASK_ADMIN_TOKEN=1`). Username/password login is **off by default** and credentials are never auto-generated — users enable it themselves (`login_enabled` + `admin_username` + `admin_password` in the config file, or the 配置 → 管理台与鉴权 panel).
 
 ## Before You Submit a PR
 

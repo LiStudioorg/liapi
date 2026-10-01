@@ -13,6 +13,12 @@
 /web/node_modules/
 /web/.nuxt/
 /web/.output/
+/web/dist
 /web/dist/
 /web/node_modules/.cache/
 *.tsbuildinfo
+
+# Local build caches created by dev shells (never commit).
+/.gocache/
+/.gomod/
+/.npmcache/

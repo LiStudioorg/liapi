@@ -142,6 +142,7 @@ func (s *Server) Handler() http.Handler {
 		http.Redirect(w, r, "/", http.StatusMovedPermanently)
 	})
 	mux.HandleFunc("POST /admin/api/login", s.adminLogin)
+	mux.HandleFunc("GET /admin/api/login-info", s.adminLoginInfo)
 	mux.HandleFunc("POST /admin/api/logout", s.requireAdmin(s.adminLogout))
 	mux.HandleFunc("GET /admin/api/me", s.requireAdmin(s.adminMe))
 	mux.HandleFunc("GET /admin/api/overview", s.requireAdmin(s.adminOverview))
@@ -183,16 +184,37 @@ func (s *Server) Handler() http.Handler {
 	})
 }
 
-// clientIP extracts the peer IP, honoring X-Forwarded-For only when the
-// config opts in (trust_proxy via admin_allow_ips + explicit header use).
-func clientIP(r *http.Request) string {
+// clientIP resolves the effective client address for allowlists, lockouts,
+// rate limits and audit. X-Forwarded-For is honored ONLY when the direct TCP
+// peer is itself a trusted proxy: the loopback address (liapi behind a local
+// nginx/caddy — the common deployment) or a peer that passes the operator's
+// admin_allow_ips. A stranger on the network can never forge the header to
+// slip past admin_allow_ips, password-lockouts, token IP policies or limits.
+func clientIP(r *http.Request, allow []string) string {
+	direct := remoteHost(r)
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		// Only honor XFF when an allowlist is configured (deployment behind
-		// a trusted proxy); otherwise spoofable.
-		if first := strings.TrimSpace(strings.Split(xff, ",")[0]); first != "" {
-			return first
+		trustedProxy := isLoopbackHost(direct) || (len(allow) > 0 && ipAllowed(direct, allow))
+		if trustedProxy {
+			if first := strings.TrimSpace(strings.Split(xff, ",")[0]); first != "" {
+				return first
+			}
 		}
 	}
+	return direct
+}
+
+// isLoopbackHost reports loopback addresses, including compressed ::1 forms.
+func isLoopbackHost(host string) bool {
+	host = strings.TrimSpace(strings.Trim(host, "[]"))
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// remoteHost extracts the TCP peer address (no port) from the request.
+func remoteHost(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		return r.RemoteAddr
@@ -231,7 +253,7 @@ func ipAllowed(ip string, allow []string) bool {
 func (s *Server) requireAdmin(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		cfg := s.holder.Get()
-		ip := clientIP(r)
+		ip := clientIP(r, cfg.AdminAllowIPs)
 		audit := func(ok bool, reason string) {
 			s.audit.Add(stats.AuditEvent{
 				IP: ip, Method: r.Method, Path: r.URL.Path, OK: ok, Reason: reason,

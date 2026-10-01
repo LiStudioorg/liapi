@@ -93,11 +93,22 @@ func contentTypeFor(path string) string {
 // cannot be brute-forced.
 func (s *Server) adminLogin(w http.ResponseWriter, r *http.Request) {
 	cfg := s.holder.Get()
-	ip := clientIP(r)
+	ip := clientIP(r, cfg.AdminAllowIPs)
 	audit := func(ok bool, reason string) {
 		s.audit.Add(stats.AuditEvent{
 			IP: ip, Method: r.Method, Path: r.URL.Path, OK: ok, Reason: reason,
 		})
+	}
+	// Username/password login can be switched off — on a fresh install no
+	// credentials exist at all, so this endpoint refuses with an explicit
+	// hint instead of pretending the credentials were wrong.
+	if !cfg.LoginAllowed() {
+		s.metrics.IncAdminDenied()
+		audit(false, "login_disabled")
+		common.WriteError(w, http.StatusForbidden,
+			"用户名/密码登录未启用：请在配置文件中设置 login_enabled=true 并填写 admin_password（保存后生效），或改用 Admin Token 登录",
+			"permission_error", "login_disabled")
+		return
 	}
 	if !ipAllowed(ip, cfg.AdminAllowIPs) {
 		s.metrics.IncAdminDenied()
@@ -156,9 +167,26 @@ func (s *Server) adminLogout(w http.ResponseWriter, r *http.Request) {
 	common.WriteJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
+// adminLoginInfo is the unauthenticated endpoint backing the login screen:
+// it reports whether username/password login is available so the SPA can
+// show the password form, the admin-token box, or both. It leaks no secrets:
+// just two booleans.
+func (s *Server) adminLoginInfo(w http.ResponseWriter, r *http.Request) {
+	cfg := s.holder.Get()
+	common.WriteJSON(w, http.StatusOK, map[string]any{
+		"login_enabled": cfg.LoginAllowed(),
+		"password_set":  cfg.AdminPasswordHash != "",
+	})
+}
+
 // adminMe reports the identity behind the current credential.
 func (s *Server) adminMe(w http.ResponseWriter, r *http.Request) {
-	common.WriteJSON(w, http.StatusOK, map[string]string{"username": s.holder.Get().AdminUsername})
+	cfg := s.holder.Get()
+	common.WriteJSON(w, http.StatusOK, map[string]any{
+		"username":      cfg.AdminUsername,
+		"login_enabled": cfg.LoginAllowed(),
+		"password_set":  cfg.AdminPasswordHash != "",
+	})
 }
 
 func (s *Server) adminOverview(w http.ResponseWriter, r *http.Request) {
@@ -717,6 +745,7 @@ func (s *Server) adminTest(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) adminGetConfig(w http.ResponseWriter, r *http.Request) {
 	cfg := s.holder.Get().Clone()
+	passwordSet := cfg.AdminPasswordHash != ""
 	for i := range cfg.Upstreams {
 		if cfg.Upstreams[i].APIKey != "" {
 			cfg.Upstreams[i].APIKey = common.MaskToken(cfg.Upstreams[i].APIKey)
@@ -735,7 +764,13 @@ func (s *Server) adminGetConfig(w http.ResponseWriter, r *http.Request) {
 	for i := range cfg.Devices {
 		cfg.Devices[i].TokenHash = hintHash(cfg.Devices[i].TokenHash)
 	}
-	common.WriteJSON(w, http.StatusOK, cfg)
+	// Write-only plaintext must never round-trip even if somehow set.
+	cfg.AdminPassword = ""
+	out := struct {
+		*config.Config
+		PasswordSet bool `json:"password_set"`
+	}{cfg, passwordSet}
+	common.WriteJSON(w, http.StatusOK, out)
 }
 
 // adminReplaceConfig is the full-config hot reload endpoint (validate → save

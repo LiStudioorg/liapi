@@ -114,30 +114,35 @@ liapi/
 
 **全部配置通过 Web 管理台完成**：打开 `http://<host>:8787/` → 输入 admin token → 所有字段（上游、令牌、设备、路由、限流等）都在界面里改，保存即热重载。
 
-`config.json` 仅作为**首次启动引导**（含 `admin_token`、`addr` 等，自动生成，之后由 Web 界面接管）。默认路径 `./config.json`，可用 `-config <path>` 指定。
+**默认不启用用户名/密码登录**：首次运行不会生成任何账号密码，开箱用启动日志里的 `admin_token` 进入管理台。想用自己写的账号密码，在「配置 → 管理台与鉴权」打开登录开关并设置密码（或直接编辑配置文件），密码将以 PBKDF2 哈希保存、明文不落盘。
+
+`config.json` 及日志、健康状态文件默认存放在 **`~/.li/liapi/`**（可用环境变量 `LIAPI_HOME` 改目录）。首次启动自动生成 `~/.li/liapi/config.json`（随机 `admin_token`、监听 `0.0.0.0:8787`、登录关闭），之后由 Web 界面接管。默认路径可用 `-config <path>` 覆盖（Docker 挂载场景常用）。
 
 管理台「配置」Tab 提供 JSON 视图与导入/导出；字段含义见下方速查表（与 `config/config.go` 中的 struct tag 对应）。
 
 ```jsonc
 {
-  "addr": ":8787",                        // 监听地址
+  "addr": "0.0.0.0",                      // 监听地址（主机；改动重启生效）
+  "port": 8787,                           // 监听端口（改动重启生效）
   "body_limit_bytes": 16777216,           // 请求体上限，默认 16MB
   "timeout": 300,                         // 非流式转发超时（秒），0=关闭
   "stream_timeout": 0,                    // 流式整体超时（秒），0=不设
   "stream_idle_timeout": 600,             // 流式空闲看门狗（秒），0=关闭，默认 600
   "max_idle_conns": 100,                  // 连接复用池
-  "log_file": "relay.jsonl",              // JSONL 日志文件（0600）
+  "log_file": "~/.li/liapi/relay.jsonl",  // JSONL 日志文件（0600；默认在 ~/.li/liapi/）
   "log_max_bytes": 104857600,             // 日志轮转阈值（默认 100MB，超限切到 .1）
   "ring_size": 800,                       // 内存环形缓冲条数
   "probe_interval": 30,                   // 健康检查间隔（秒）
   "probe_fail_threshold": 3,              // 连续失败 N 次才判不健康
   "probe_concurrency": 8,                 // 健康探测最大并发（默认 8）
-  "health_state_file": "health_state.json", // 健康状态持久化文件
+  "health_state_file": "~/.li/liapi/health_state.json", // 健康状态持久化文件
   "skip_unhealthy": true,                 // 路由时避开不健康上游（可开关）
 
-  "admin_token": "adm-sk-xxxxxxxx",       // 管理接口鉴权（独立）；保留给 /metrics 与脚本
-  "admin_username": "admin",              // 管理台登录用户名
-  "admin_password_hash": "pbkdf2-sha256$…", // 管理台登录密码（PBKDF2 哈希，不明文存储）
+  "admin_token": "adm-sk-xxxxxxxx",       // 管理接口鉴权（独立）；开箱登录方式 + /metrics 与脚本
+  "login_enabled": false,                 // 用户名/密码登录开关（默认关闭）
+  "admin_username": "admin",              // 管理台登录用户名（开启登录后可改）
+  "admin_password": "",                   // 仅写入用：填明文，保存时自动转哈希并清空
+  "admin_password_hash": "",              // 登录密码（PBKDF2 哈希，不明文存储；默认空=未设置）
   "admin_rate_per_minute": 60,            // 管理接口按 IP 限流（-1=关闭，0/未设=默认60）
   "admin_allow_ips": [],                  // 管理接口 IP/CIDR 白名单，空=不限
   "metrics_token": "",                    // /metrics 鉴权 token；"-"=内网免鉴权；
@@ -233,10 +238,13 @@ liapi/
 
 | 字段 | 说明 |
 |---|---|
-| `admin_username` / `admin_password_hash` | 管理台登录账号；密码只存 PBKDF2-HMAC-SHA256 加盐哈希，首次运行自动生成并在终端打印一次 |
-| `admin_token` | 静态管理 token，保留给 `/metrics` 与脚本自动化；日常登录改用用户名+密码 |
+| `addr` / `port` | 监听地址与端口（addr 可写裸主机如 `0.0.0.0`，也兼容旧 `:8787` 写法；port 非 0 时优先生效）。**改动需重启**，其余字段热重载 |
+| `login_enabled` | 用户名/密码登录开关。**默认关闭**（无密码即不可用密码登录）；`true` 时必须已设置密码；关闭时 `admin_token` 仍然可以进管理台 |
+| `admin_username` / `admin_password_hash` | 管理台登录账号；密码只存 PBKDF2-HMAC-SHA256 加盐哈希。**任何账号密码都不会自动生成**——想用自己写的，在管理台配置页或配置文件里设置 |
+| `admin_password`（只写） | 在配置文件或管理台填入明文，校验时自动转成 `admin_password_hash` 并从内存/磁盘清除明文；导出与 GET 永不返回 |
+| `admin_token` | 静态管理 token：登录关闭时的开箱登录方式，同时保留给 `/metrics` 与脚本自动化 |
 | `admin_rate_per_minute` | 管理 API 每 IP 每分钟请求数（防暴力破解）；`-1`=关闭，`0`/未设=默认 60 |
-| `admin_allow_ips` | 管理 API IP/CIDR 白名单；同时用于是否信任 `X-Forwarded-For` |
+| `admin_allow_ips` | 管理 API IP/CIDR 白名单；同时决定哪些来源 IP 被视为可信反代（仅 loopback 或列于此表者的 `X-Forwarded-For` 会被采信，其余来源伪造 XFF 一律无效） |
 | `metrics_token` | `/metrics` 鉴权；`"-"`=免鉴权；未设置=要求 admin token |
 | `rate_limit_per_minute` | 客户端**滑动窗口**限流（窗口边界不再出现突发翻倍） |
 | `daily_per_token` | 每日（UTC）请求配额，0=关闭；设备可用 `daily` 覆盖 |
@@ -380,7 +388,8 @@ return failAll(lastErr)                       # 502 或透传最后一次的 sta
 | 路径 | 方法 | 说明 |
 |---|---|---|
 | `/` | GET | 管理台 SPA（Nuxt 静态构建，go:embed；含设备/统计/配置编辑）；`/admin` 301 → `/` |
-| `/admin/api/login` | POST | 登录：`{username,password}` → 短期会话 token（受 IP 白名单/锁定/限流保护） |
+| `/admin/api/login` | POST | 登录：`{username,password}` → 短期会话 token（受 IP 白名单/锁定/限流保护；未开启登录时 403） |
+| `/admin/api/login-info` | GET | 免鉴权：`{login_enabled, password_set}`，登录页据此选择表单 |
 | `/admin/api/logout` | POST | 退出登录：使当前会话 token 失效 |
 | `/admin/api/me` | GET | 返回当前登录用户名 |
 | `/admin/api/overview` | GET | 请求数 / 成功率 / 平均延迟 / token 量 / 费用 / 故障转移数 |
@@ -410,16 +419,20 @@ return failAll(lastErr)                       # 502 或透传最后一次的 sta
 | `/admin/api/stats/devices?n=` | GET | 设备用量排行 |
 | `/metrics` | GET | Prometheus 文本格式；`metrics_token`（`"-"`=免鉴权）或 admin token |
 
-管理台前端通过独立的 `/login` 登录页输入**用户名 + 密码**（校验通过后服务端签发短期会话 token，存 `localStorage`，每次请求带 `Authorization: Bearer <session>`）；未登录访问任意页面会自动跳转登录页，不使用浏览器原生对话框。**管理登录账号与调用模型的客户端 token 严格分离**：前者只登管理台，后者（`devices[]` / `client_tokens[]`）只用于 `/v1/*` 调用模型。
+管理台前端通过独立的 `/login` 登录页认证：默认（未开启登录）输入 **Admin Token** 直接解锁；开启 `login_enabled` 后可改用**用户名 + 密码**（校验通过后服务端签发短期会话 token，存 `localStorage`，每次请求带 `Authorization: Bearer <session>`）。登录页依据 `GET /admin/api/login-info`（免鉴权，仅返回两个布尔值）决定展示哪种表单；未登录访问任意页面会自动跳转登录页，不使用浏览器原生对话框。**管理登录凭据与调用模型的客户端 token 严格分离**：前者只登管理台，后者（`devices[]` / `client_tokens[]`）只用于 `/v1/*` 调用模型。
 
 ### 7.3 部署（Docker）
 
+容器内默认路径仍是 `-config /data/config.json`（`Dockerfile` 的 CMD），配置与日志挂载在 `./data`：
+
 ```bash
 mkdir -p data && umask 077
-# 准备 data/config.json（或首次启动后 Ctrl+C 再编辑，注意 chmod 600）
+# 首次启动会自动生成 data/config.json（0600，含随机 admin_token；登录默认关闭）；
+# 从容器日志里复制 admin_token 登录管理台，或 Ctrl+C 后编辑该文件
 docker compose up -d --build
 # 或
 docker build -t liapi . && docker run -p 8787:8787 -v "$PWD/data:/data" liapi
+# 换监听端口：同时改 -config 同级的 compose ports 与配置文件里的 port，然后重启容器
 ```
 
 ---
@@ -545,18 +558,25 @@ docker build -t liapi . && docker run -p 8787:8787 -v "$PWD/data:/data" liapi
 ## 十四、运行方式
 
 ```bash
-# 首次运行自动生成默认 config.json（随机 admin_token + 随机 admin 账号密码，
-# 用户名默认为 admin，密码在控制台方框中醒目打印，仅显示这一次）
-go build -o liapi ./...
-./liapi -config config.json
-# 想隐藏明文（共享日志/录屏）：LIAPI_MASK_ADMIN_TOKEN=1 ./liapi -config config.json
+# 首次运行：自动在 ~/.li/liapi/ 生成 config.json（随机 admin_token；
+# 监听 0.0.0.0:8787；用户名/密码登录默认关闭——不再生成任何账号密码），
+# 控制台方框打印管理台地址、admin_token 与开启登录的方法。
+go build -o liapi .
+./liapi                                   # 默认读 ~/.li/liapi/config.json
+./liapi -config /data/config.json         # 或指定路径（Docker 常用）
+# 自定义数据目录：LIAPI_HOME=/var/lib/liapi ./liapi
+# 想隐藏明文（共享日志/录屏）：LIAPI_MASK_ADMIN_TOKEN=1 ./liapi
+
+# 想用账号密码登录：编辑 ~/.li/liapi/config.json 写入
+#   "login_enabled": true, "admin_username": "你的名字", "admin_password": "你的密码"
+# 保存后重启（或在管理台配置页填 password 保存）；明文会立即转成 PBKDF2 哈希。
 
 # 冒烟
 curl http://localhost:8787/v1/models -H "Authorization: Bearer sk-client-aaa"
 curl http://localhost:8787/v1/chat/completions -H "Authorization: Bearer sk-client-aaa" \
      -d '{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}' -N
 
-# 管理台
+# 管理台（开箱用启动日志里的 admin_token 登录）
 open http://localhost:8787/
 ```
 

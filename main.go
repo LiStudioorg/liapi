@@ -3,10 +3,14 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -22,34 +26,73 @@ import (
 // version is overridden at link time by buildrelease.sh (-X main.version=…).
 var version = "dev"
 
-// printAdminBanner surfaces how to log in to the admin UI. The login account
-// is username/password; on first run the generated password is shown once here
-// (it is never stored in plaintext). The static admin token is also printed as
-// a fallback credential for /metrics and automation.
+// printAdminBanner surfaces how to reach the admin UI. No credentials are
+// ever generated: fresh installs ship with login disabled until the user
+// sets login_enabled + a password themselves. The static admin token is
+// printed as the default way into the console (masked with
+// LIAPI_MASK_ADMIN_TOKEN=1).
 func printAdminBanner(cfg *config.Config, configPath string) {
+	addr := cfg.ListenAddr()
+	display := addr
+	if h, p := cfg.HostPort(); h == "" || h == "0.0.0.0" || h == "::" {
+		display = "localhost:" + itoa(p)
+	}
 	token := cfg.AdminToken
 	if os.Getenv("LIAPI_MASK_ADMIN_TOKEN") == "1" {
-		token = common.MaskToken(cfg.AdminToken) + "  (masked; see " + configPath + ")"
-	}
-	pw := "(unchanged — set via 管理台 配置页)"
-	if cfg.FirstRunPassword != "" {
-		pw = cfg.FirstRunPassword + "  (首次生成，仅显示这一次)"
-	} else if os.Getenv("LIAPI_MASK_ADMIN_TOKEN") == "1" {
-		pw = "(masked; reset via config)"
+		token = common.MaskToken(cfg.AdminToken) + "  (已脱敏；完整值见 " + configPath + ")"
 	}
 	const bar = "════════════════════════════════════════════════════════════════"
-	log.Printf("\n%s\n  Liapi 管理台  http://<host>%s/\n\n  登录入口    http://<host>%s/\n  用户名      %s\n  密码        %s\n\n  Admin Token :  %s\n  （Token 仅用于 /metrics 与脚本；日常登录用用户名+密码）\n%s",
-		bar, cfg.Addr, cfg.Addr, cfg.AdminUsername, pw, token, bar)
+	lines := []string{
+		"  管理台        http://" + display + "/",
+		"  Admin Token :  " + token,
+		"  （用 Token 登录管理台：打开页面后直接输入 Token；日常自动化脚本也可用）",
+		"  配置文件      " + configPath,
+	}
+	if !cfg.LoginAllowed() {
+		lines = append(lines,
+			"",
+			"  用户名/密码登录：未启用。",
+			"  想用自己写的账号密码登录，编辑配置文件：",
+			`    "login_enabled": true,`,
+			`    "admin_username": "你的用户名",`,
+			`    "admin_password": "你的密码"      ← 保存后自动转为哈希，明文不再保留`,
+		)
+	} else {
+		lines = append(lines, "  登录账号      "+cfg.AdminUsername+" （用户名+密码登录已启用）")
+	}
+	log.Printf("\n%s\n%s\n%s", bar, strings.Join(lines, "\n"), bar)
+}
+
+func itoa(n int) string {
+	return strconv.Itoa(n)
 }
 
 func main() {
-	configPath := flag.String("config", "config.json", "path to config file")
+	defaultCfg := config.DefaultConfigPath()
+	configPath := flag.String("config", defaultCfg, fmt.Sprintf("path to config file (default %s)", defaultCfg))
 	showVer := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
 
 	if *showVer {
 		log.Printf("liapi %s", version)
 		return
+	}
+
+	// Normalize: an empty -config falls back to the default path, and relative
+	// paths are pinned to an absolute location so admin-API saves (atomic
+	// rename next to the file) always target this same file.
+	if strings.TrimSpace(*configPath) == "" {
+		*configPath = config.DefaultConfigPath()
+	}
+	if abs, err := filepath.Abs(*configPath); err == nil {
+		*configPath = abs
+	}
+
+	// Best effort: the data dir is only strictly needed for default paths.
+	// Operators pointing -config elsewhere (Docker's /data, read-only HOME)
+	// keep working — the file owners (logger/config save) create dirs as needed.
+	if err := config.EnsureDataDir(); err != nil {
+		log.Printf("[warn] cannot create data dir %s: %v (fine if -config and log paths are elsewhere)", config.DataDir(), err)
 	}
 
 	cfg, err := config.Load(*configPath)
@@ -64,7 +107,6 @@ func main() {
 
 	log.Printf("config loaded from %s", *configPath)
 	printAdminBanner(cfg, *configPath)
-	cfg.FirstRunPassword = ""
 
 	logger, err := stats.NewLogger(cfg.LogFile, cfg.RingSize, cfg.LogMaxBytes)
 	if err != nil {
@@ -93,7 +135,7 @@ func main() {
 		idle = 0
 	}
 	httpSrv := &http.Server{
-		Addr:              cfg.Addr,
+		Addr:              cfg.ListenAddr(),
 		Handler:           srv.Handler(),
 		ReadHeaderTimeout: 15 * time.Second,
 		// IdleTimeout only applies between requests on a keep-alive conn; it
@@ -112,7 +154,7 @@ func main() {
 		_ = httpSrv.Shutdown(shutdownCtx)
 	}()
 
-	log.Printf("liapi %s listening on %s (version=%s)", version, cfg.Addr, version)
+	log.Printf("liapi %s listening on %s (version=%s)", version, cfg.ListenAddr(), version)
 	if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("server: %v", err)
 	}

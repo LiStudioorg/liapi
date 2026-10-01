@@ -38,6 +38,7 @@ const openPanels = ref<(string | number)[]>(['network'])
 // round-trip) are represented; upstreams/devices keep their dedicated pages.
 const form = reactive({
   addr: '',
+  port: 0,
   body_limit_bytes: 0,
   timeout: 0,
   stream_timeout: 0,
@@ -59,6 +60,7 @@ const form = reactive({
   admin_username: '',
   admin_token: '',
   admin_password: '',
+  login_enabled: false,
   admin_rate_per_minute: 0,
   admin_allow_ips: '',
   metrics_token: '',
@@ -134,11 +136,16 @@ function readForm(cfg: Raw) {
     daily_per_token: Number(cfg.daily_per_token) || 0,
     admin_username: cfg.admin_username ?? '',
     admin_token: cfg.admin_token ?? '',
+    login_enabled:
+      typeof cfg.login_enabled === 'boolean'
+        ? cfg.login_enabled
+        : !!cfg.admin_password_hash,
     admin_rate_per_minute: Number(cfg.admin_rate_per_minute) || 0,
     admin_allow_ips: (cfg.admin_allow_ips || []).join(', '),
     metrics_token: cfg.metrics_token ?? '',
     route_strategy: cfg.route_strategy || 'priority',
   })
+  form.port = Number(cfg.port) || 0
   form.admin_password = ''
   form.alerts = {
     webhooks: a.webhooks || [],
@@ -228,6 +235,7 @@ function buildConfig(): Raw {
 
   Object.assign(base, {
     addr: form.addr,
+    port: Number(form.port) || 0,
     body_limit_bytes: Number(form.body_limit_bytes) || 0,
     timeout: Number(form.timeout) || 0,
     stream_timeout: Number(form.stream_timeout) || 0,
@@ -248,6 +256,7 @@ function buildConfig(): Raw {
     daily_per_token: Number(form.daily_per_token) || 0,
     admin_username: form.admin_username,
     admin_token: form.admin_token,
+    login_enabled: !!form.login_enabled,
     admin_rate_per_minute: Number(form.admin_rate_per_minute) || 0,
     admin_allow_ips: form.admin_allow_ips
       .split(',')
@@ -400,8 +409,12 @@ function addBark() {
         <Collapse v-if="view === 'form'" v-model="openPanels">
           <CollapseItem name="network" title="监听与转发">
             <div class="grid grid-cols-1 gap-x-6 gap-y-1 px-1 sm:grid-cols-2 lg:grid-cols-3">
-              <Field label="addr（监听地址）">
-                <Input v-model="form.addr" placeholder=":8787" />
+              <Field label="addr（监听地址，重启生效）">
+                <Input v-model="form.addr" placeholder="0.0.0.0 或 127.0.0.1" />
+              </Field>
+              <Field label="port（监听端口，重启生效）">
+                <InputNumber v-model="form.port" :min="0" :max="65535" :step="1" controls placeholder="8787" />
+                <span class="text-[11px] text-muted-foreground">0 = 默认 8787；修改后需重启 liapi</span>
               </Field>
               <Field label="body_limit_bytes（请求体上限）">
                 <InputNumber v-model="form.body_limit_bytes" :min="0" :step="1048576" controls />
@@ -488,6 +501,17 @@ function addBark() {
 
           <CollapseItem name="admin" title="管理台与鉴权">
             <div class="grid grid-cols-1 gap-x-6 gap-y-1 px-1 sm:grid-cols-2 lg:grid-cols-3">
+              <Field label="用户名/密码登录（login_enabled）">
+                <div class="flex h-9 items-center gap-2">
+                  <Switch v-model="form.login_enabled" />
+                  <span class="text-[11px] text-muted-foreground">
+                    {{ form.login_enabled ? '开启：用下方账号密码登录' : '关闭：仅 Admin Token 可进管理台' }}
+                  </span>
+                </div>
+                <span class="text-[11px] text-muted-foreground">
+                  开启需先设置密码；关闭后 Admin Token 仍然可用
+                </span>
+              </Field>
               <Field label="admin_username（登录用户名）">
                 <Input v-model="form.admin_username" />
               </Field>

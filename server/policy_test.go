@@ -37,12 +37,13 @@ func TestTokenPolicyIPAllowlist(t *testing.T) {
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("want 403 for disallowed IP, got %d", rec.Code)
 	}
-	// Spoofed XFF is honored only when... clientIP always honors XFF currently.
+	// A forged XFF from a non-proxy peer must NOT satisfy the token's IP
+	// allowlist — only loopback or configured admin-proxy peers may forward.
 	req := newRequest("GET", "/v1/models", "sk-client-0123456789", "")
 	req.Header.Set("X-Forwarded-For", "203.0.113.9")
 	rec2 := serve(srv, req)
-	if rec2.Code != http.StatusOK {
-		t.Fatalf("allowlisted IP should pass, got %d %s", rec2.Code, rec2.Body.String())
+	if rec2.Code != http.StatusForbidden {
+		t.Fatalf("forged XFF must not bypass token IP policy, got %d %s", rec2.Code, rec2.Body.String())
 	}
 }
 

@@ -4,10 +4,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -124,24 +126,35 @@ type AliasRule struct {
 }
 
 type Config struct {
-	Addr               string                 `json:"addr"`
-	BodyLimitBytes     int64                  `json:"body_limit_bytes"`
-	Timeout            Duration               `json:"timeout"`
-	StreamTimeout      Duration               `json:"stream_timeout"`
-	StreamIdleTimeout  Duration               `json:"stream_idle_timeout"`
-	MaxIdleConns       int                    `json:"max_idle_conns"`
-	LogFile            string                 `json:"log_file"`
-	LogMaxBytes        int64                  `json:"log_max_bytes"`
-	RingSize           int                    `json:"ring_size"`
-	ProbeInterval      Duration               `json:"probe_interval"`
-	ProbeTimeout       Duration               `json:"probe_timeout"`
-	ProbeFailThreshold int                    `json:"probe_fail_threshold"`
-	ProbeConcurrency   int                    `json:"probe_concurrency"`
-	HealthStateFile    string                 `json:"health_state_file"`
-	SkipUnhealthy      bool                   `json:"skip_unhealthy"`
-	AdminToken         string                 `json:"admin_token"`
-	AdminUsername      string                 `json:"admin_username"`
-	AdminPasswordHash  string                 `json:"admin_password_hash"`
+	Addr               string   `json:"addr"`
+	Port               int      `json:"port,omitempty"`
+	BodyLimitBytes     int64    `json:"body_limit_bytes"`
+	Timeout            Duration `json:"timeout"`
+	StreamTimeout      Duration `json:"stream_timeout"`
+	StreamIdleTimeout  Duration `json:"stream_idle_timeout"`
+	MaxIdleConns       int      `json:"max_idle_conns"`
+	LogFile            string   `json:"log_file"`
+	LogMaxBytes        int64    `json:"log_max_bytes"`
+	RingSize           int      `json:"ring_size"`
+	ProbeInterval      Duration `json:"probe_interval"`
+	ProbeTimeout       Duration `json:"probe_timeout"`
+	ProbeFailThreshold int      `json:"probe_fail_threshold"`
+	ProbeConcurrency   int      `json:"probe_concurrency"`
+	HealthStateFile    string   `json:"health_state_file"`
+	SkipUnhealthy      bool     `json:"skip_unhealthy"`
+	AdminToken         string   `json:"admin_token"`
+	AdminUsername      string   `json:"admin_username"`
+	AdminPasswordHash  string   `json:"admin_password_hash"`
+	// AdminPassword is a write-only convenience field: set it (in the JSON
+	// config or the admin UI) and Validate() converts it to a PBKDF2 hash in
+	// AdminPasswordHash and clears the plaintext before anything is saved.
+	AdminPassword string `json:"admin_password,omitempty"`
+	// LoginEnabled gates username/password login for the admin UI.
+	// nil (field absent in JSON) = backward compatible: enabled when an
+	// admin_password_hash exists, disabled otherwise. true requires a
+	// password to be set; false always refuses password login (the static
+	// admin_token keeps working).
+	LoginEnabled       *bool                  `json:"login_enabled,omitempty"`
 	AdminRatePerMinute int                    `json:"admin_rate_per_minute"`
 	AdminAllowIPs      []string               `json:"admin_allow_ips"`
 	MetricsToken       string                 `json:"metrics_token"`
@@ -161,16 +174,117 @@ type Config struct {
 	RetryOnTimeout     bool                   `json:"retry_on_timeout"`
 	Upstreams          []Upstream             `json:"upstreams"`
 	Devices            []Device               `json:"devices"`
+}
 
-	// FirstRunPassword carries a freshly generated admin password in cleartext
-	// for one startup only (printed in the terminal banner). It is never
-	// persisted: json:"-" and cleared by main.go after printing.
-	FirstRunPassword string `json:"-"`
+// DefaultHost / DefaultPort are the listener defaults used when the config
+// file leaves addr/port unset (first-run bootstrap writes them explicitly).
+const (
+	DefaultHost = "0.0.0.0"
+	DefaultPort = 8787
+)
+
+// DataDir returns the per-user data directory (~/.li/liapi, overridable with
+// LIAPI_HOME). The default config file, relay log and health-state file all
+// live here so liapi never writes into the current working directory.
+func DataDir() string {
+	if v := strings.TrimSpace(os.Getenv("LIAPI_HOME")); v != "" {
+		return v
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return filepath.Join(".li", "liapi")
+	}
+	return filepath.Join(home, ".li", "liapi")
+}
+
+// DefaultConfigPath is the config file used when -config is not given.
+func DefaultConfigPath() string { return filepath.Join(DataDir(), "config.json") }
+
+// EnsureDataDir creates the data directory (0700: it holds secrets).
+func EnsureDataDir() error { return os.MkdirAll(DataDir(), 0o700) }
+
+// splitHostPort splits a listen address into host and port. It accepts
+// ":8787", "127.0.0.1:8787", "127.0.0.1" and "[::1]:8787". The port is 0 when
+// the address carries none.
+func splitHostPort(addr string) (host string, port int) {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return "", 0
+	}
+	h, p, err := net.SplitHostPort(addr)
+	if err == nil {
+		n, _ := strconv.Atoi(p)
+		return h, n
+	}
+	// No port separator: bare host, or bare [::1].
+	if strings.HasPrefix(addr, "[") {
+		return addr, 0
+	}
+	if n, err := strconv.Atoi(addr); err == nil {
+		return "", n // bare port, e.g. "8787"
+	}
+	return addr, 0
+}
+
+// ListenAddr resolves the effective listener address from addr + port.
+// addr may already carry a port (legacy form, ":8787"); an explicit non-zero
+// port always wins. IPv6 hosts are re-bracketed.
+func (c *Config) ListenAddr() string {
+	host, addrPort := splitHostPort(c.Addr)
+	port := c.Port
+	if port <= 0 {
+		port = addrPort
+	}
+	if port <= 0 {
+		port = DefaultPort
+	}
+	if host == "" {
+		host = DefaultHost
+	}
+	return net.JoinHostPort(host, strconv.Itoa(port))
+}
+
+// HostPort reports the host/port pair after resolution (for the UI/banner).
+func (c *Config) HostPort() (string, int) { return splitHostPort(c.ListenAddr()) }
+
+// validateListen rejects an unusable addr/port combination.
+func (c *Config) validateListen() error {
+	addr := strings.TrimSpace(c.Addr)
+	if strings.ContainsAny(addr, "/\\") {
+		return fmt.Errorf("addr %q must be a bare host (e.g. 0.0.0.0) or legacy host:port, no scheme/path", addr)
+	}
+	if c.Port < 0 || c.Port > 65535 {
+		return fmt.Errorf("port must be in [0,65535] (0 = default %d), got %d", DefaultPort, c.Port)
+	}
+	if addr != "" {
+		if _, p := splitHostPort(addr); c.Port == 0 && p == 0 {
+			// Bare host is fine; but reject values that are neither host
+			// nor host:port (e.g. "a b").
+			if strings.ContainsAny(addr, " \t") {
+				return fmt.Errorf("addr %q is invalid", addr)
+			}
+		}
+	}
+	return nil
+}
+
+// LoginAllowed reports whether username/password login should be accepted:
+// the explicit switch when present, otherwise "a password has been set".
+func (c *Config) LoginAllowed() bool {
+	if c.LoginEnabled != nil {
+		return *c.LoginEnabled
+	}
+	return c.AdminPasswordHash != ""
 }
 
 func (c *Config) SetDefaults() {
-	if c.Addr == "" {
-		c.Addr = ":8787"
+	// Addr/Port: addr may be a bare host ("0.0.0.0") or the legacy
+	// host:port form. Leave both untouched when absent — ListenAddr()
+	// resolves them, and the generated config file writes them explicitly.
+	if c.Port <= 0 {
+		if _, p := splitHostPort(c.Addr); p > 0 {
+			c.Port = p
+		}
 	}
 	if c.BodyLimitBytes <= 0 {
 		c.BodyLimitBytes = 16 << 20
@@ -182,7 +296,7 @@ func (c *Config) SetDefaults() {
 		c.MaxIdleConns = 100
 	}
 	if c.LogFile == "" {
-		c.LogFile = "relay.jsonl"
+		c.LogFile = filepath.Join(DataDir(), "relay.jsonl")
 	}
 	if c.LogMaxBytes <= 0 {
 		c.LogMaxBytes = 100 << 20
@@ -203,7 +317,7 @@ func (c *Config) SetDefaults() {
 		c.ProbeConcurrency = 8
 	}
 	if c.HealthStateFile == "" {
-		c.HealthStateFile = "health_state.json"
+		c.HealthStateFile = filepath.Join(DataDir(), "health_state.json")
 	}
 	if c.AdminRatePerMinute == 0 {
 		c.AdminRatePerMinute = 60 // 0 = unset → default; -1 = explicitly disabled
@@ -275,20 +389,29 @@ func (c *Config) Validate() error {
 	if strings.TrimSpace(c.AdminUsername) == "" {
 		c.AdminUsername = "admin"
 	}
-	// First run: seed admin login credentials. The plaintext password is
-	// surfaced once via FirstRunPassword (printed by main.go), then discarded.
-	if c.AdminPasswordHash == "" {
-		pw := common.RandomPassword()
+	// Plaintext admin_password (config file or admin UI) → PBKDF2 hash. The
+	// plaintext is cleared immediately; it is never persisted.
+	if pw := c.AdminPassword; pw != "" {
 		hash, err := common.HashPassword(pw)
 		if err != nil {
-			return fmt.Errorf("generate admin password: %w", err)
+			return fmt.Errorf("hash admin password: %w", err)
 		}
 		c.AdminPasswordHash = hash
-		c.FirstRunPassword = pw
-	} else if !common.IsPasswordHash(c.AdminPasswordHash) && !strings.Contains(c.AdminPasswordHash, "...") {
-		// Masked placeholders (e.g. "admi...hash") are restored by the server
-		// after validation; only genuinely malformed values are rejected.
+		c.AdminPassword = ""
+	}
+	// No credentials are ever generated: an empty admin_password_hash means
+	// "login not configured" and username/password login stays unavailable.
+	// Users enable it themselves (login_enabled=true + a password).
+	if c.AdminPasswordHash != "" && !common.IsPasswordHash(c.AdminPasswordHash) && !strings.Contains(c.AdminPasswordHash, "...") {
+		// Masked placeholders (e.g. "pbkd...hash") are restored by the server
+		// validation path; only genuinely malformed values are rejected.
 		return errors.New("admin_password_hash: malformed (expected pbkdf2-sha256$...)")
+	}
+	if c.LoginEnabled != nil && *c.LoginEnabled && c.AdminPasswordHash == "" {
+		return errors.New("login_enabled=true 需要先设置管理台密码（admin_password）")
+	}
+	if err := c.validateListen(); err != nil {
+		return err
 	}
 	if c.RateLimitPerMinute < 0 {
 		return errors.New("rate_limit_per_minute must be >= 0")
@@ -406,19 +529,27 @@ func (c *Config) Clone() *Config {
 }
 
 // Load reads the config file. If it does not exist, a default config is
-// generated (with a random admin token) and saved.
+// generated (random admin_token, login disabled — no credentials are ever
+// generated) and saved to path; parent_directory is created with 0700.
 func Load(path string) (*Config, error) {
 	if path == "" {
-		cfg := &Config{}
-		cfg.SetDefaults()
-		return cfg, nil
+		path = DefaultConfigPath()
 	}
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
 		cfg := &Config{}
 		cfg.SetDefaults()
+		if strings.TrimSpace(cfg.Addr) == "" {
+			cfg.Addr = DefaultHost
+		}
+		if cfg.Port == 0 {
+			cfg.Port = DefaultPort
+		}
 		if err := cfg.Validate(); err != nil {
 			return nil, err
+		}
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			return nil, fmt.Errorf("create config dir: %w", err)
 		}
 		if err := Save(path, cfg); err != nil {
 			return nil, fmt.Errorf("create default config: %w", err)
@@ -436,8 +567,17 @@ func Load(path string) (*Config, error) {
 	if err := json.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
+	// If the file carried a plaintext admin_password (hand-edited), Validate()
+	// converts it to a hash and clears the plaintext — persist that immediately
+	// so the secret never lingers on disk.
+	hadPlaintext := cfg.AdminPassword != ""
 	if err := cfg.Validate(); err != nil {
 		return nil, err
+	}
+	if hadPlaintext {
+		if err := Save(path, cfg); err != nil {
+			return nil, fmt.Errorf("persist hashed admin password: %w", err)
+		}
 	}
 	return cfg, nil
 }

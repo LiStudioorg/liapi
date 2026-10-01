@@ -250,7 +250,7 @@ func (s *Server) enforceTokenPolicy(w http.ResponseWriter, r *http.Request, cfg 
 			return false, http.StatusUnauthorized, "token expired"
 		}
 	}
-	if !ipAllowed(clientIP(r), pol.AllowIPs) {
+	if !ipAllowed(clientIP(r, cfg.AdminAllowIPs), pol.AllowIPs) {
 		common.WriteError(w, http.StatusForbidden, "token not allowed from this ip", "permission_error", "ip_forbidden")
 		return false, http.StatusForbidden, "ip_forbidden"
 	}

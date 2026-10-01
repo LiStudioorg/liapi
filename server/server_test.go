@@ -128,14 +128,46 @@ func TestAdminIPAllowlist(t *testing.T) {
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("want 403 for IP not in allowlist, got %d", rec.Code)
 	}
-	// X-Forwarded-For honored only because allowlist is configured.
+	// A forged X-Forwarded-For from a stranger must NOT bypass the allowlist:
+	// the header is honored only from loopback or allowlisted proxy peers.
 	req := httptest.NewRequest("GET", "/admin/api/overview", nil)
 	req.Header.Set("Authorization", "Bearer "+adminTok)
 	req.Header.Set("X-Forwarded-For", "203.0.113.7")
 	rec2 := httptest.NewRecorder()
 	h.ServeHTTP(rec2, req)
-	if rec2.Code != http.StatusOK {
-		t.Fatalf("allowlisted XFF should pass, got %d (%s)", rec2.Code, rec2.Body.String())
+	if rec2.Code != http.StatusForbidden {
+		t.Fatalf("forged XFF from stranger must stay 403, got %d (%s)", rec2.Code, rec2.Body.String())
+	}
+}
+
+func TestClientIPProxyTrust(t *testing.T) {
+	mk := func(remote, xff string) *http.Request {
+		r := httptest.NewRequest("GET", "/", nil)
+		r.RemoteAddr = remote
+		if xff != "" {
+			r.Header.Set("X-Forwarded-For", xff)
+		}
+		return r
+	}
+	allow := []string{"198.51.100.0/24"}
+	cases := []struct {
+		name, remote, xff, allow0, want string
+	}{
+		{"no header", "203.0.113.5:4321", "", "", "203.0.113.5"},
+		{"stranger cannot forge", "203.0.113.5:4321", "8.8.8.8", "", "203.0.113.5"},
+		{"stranger cannot forge even with allowlist", "203.0.113.5:4321", "8.8.8.8", "allow", "203.0.113.5"},
+		{"loopback proxy trusted", "127.0.0.1:5555", "8.8.8.8, 10.0.0.1", "", "8.8.8.8"},
+		{"loopback v6 proxy trusted", "[::1]:5555", "8.8.8.8", "", "8.8.8.8"},
+		{"allowlisted proxy trusted", "198.51.100.7:5555", "8.8.8.8", "allow", "8.8.8.8"},
+	}
+	for _, c := range cases {
+		var al []string
+		if c.allow0 == "allow" {
+			al = allow
+		}
+		if got := clientIP(mk(c.remote, c.xff), al); got != c.want {
+			t.Errorf("%s: clientIP = %q, want %q", c.name, got, c.want)
+		}
 	}
 }
 
@@ -426,5 +458,81 @@ func TestAdminLoginFlow(t *testing.T) {
 	rec = do(h, "GET", "/admin/api/me", adminTok, "")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("static token want 200, got %d", rec.Code)
+	}
+}
+
+// Fresh installs ship with no credentials: login is disabled, the login
+// endpoint refuses with 401/403, but the static admin token still works.
+func TestAdminLoginDisabled(t *testing.T) {
+	srv, _ := newTestServer(t, nil) // no password set by default anymore
+	h := srv.Handler()
+
+	// login-info advertises the disabled state.
+	rec := do(h, "GET", "/admin/api/login-info", "", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("login-info want 200, got %d", rec.Code)
+	}
+	var info struct {
+		LoginEnabled bool `json:"login_enabled"`
+		PasswordSet  bool `json:"password_set"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &info); err != nil {
+		t.Fatal(err)
+	}
+	if info.LoginEnabled || info.PasswordSet {
+		t.Fatalf("fresh config should have login off: %+v", info)
+	}
+
+	// Password login refuses even with plausible credentials.
+	rec = do(h, "POST", "/admin/api/login", "", `{"username":"admin","password":"x"}`)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("login while disabled want 403, got %d", rec.Code)
+	}
+
+	// Static admin token still unlocks the console.
+	rec = do(h, "GET", "/admin/api/me", adminTok, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("static token want 200, got %d", rec.Code)
+	}
+
+	// Setting a plaintext admin_password through the config API hashes it and
+	// turns login on; the plaintext never appears in GET /config.
+	// The payload keeps the current admin token (a full replace without one
+	// would rotate it).
+	rec = do(h, "POST", "/admin/api/config", adminTok,
+		`{"admin_token":"`+adminTok+`","admin_username":"myuser","admin_password":"hunter2-proper","login_enabled":true}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("set password want 200, got %d %s", rec.Code, rec.Body.String())
+	}
+
+	// login-info now reports an enabled login with a password set.
+	rec = do(h, "GET", "/admin/api/login-info", "", "")
+	if err := json.Unmarshal(rec.Body.Bytes(), &info); err != nil {
+		t.Fatal(err)
+	}
+	if !info.LoginEnabled || !info.PasswordSet {
+		t.Fatalf("after setting password: %+v", info)
+	}
+
+	// The configured password logs in.
+	rec = do(h, "POST", "/admin/api/login", "", `{"username":"myuser","password":"hunter2-proper"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("login after opt-in want 200, got %d %s", rec.Code, rec.Body.String())
+	}
+
+	// GET /config never leaks the plaintext or the raw hash.
+	rec = do(h, "GET", "/admin/api/config", adminTok, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get config want 200, got %d", rec.Code)
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, "hunter2-proper") {
+		t.Fatal("plaintext password leaked in GET /config")
+	}
+	if strings.Contains(body, "pbkdf2-sha256$") {
+		t.Fatal("raw password hash leaked in GET /config")
+	}
+	if !strings.Contains(body, `"password_set":true`) {
+		t.Fatalf("password_set hint missing: %s", body)
 	}
 }

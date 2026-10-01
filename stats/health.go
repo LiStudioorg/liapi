@@ -326,7 +326,7 @@ func (h *Health) save() {
 		return
 	}
 	dir := filepath.Dir(path)
-	_ = os.MkdirAll(dir, 0o755)
+	_ = os.MkdirAll(dir, 0o700) // state file holds upstream URLs — keep the dir private
 	tmp, err := os.CreateTemp(dir, ".health-*.tmp")
 	if err != nil {
 		return

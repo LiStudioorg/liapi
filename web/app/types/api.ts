@@ -186,6 +186,7 @@ export interface DeviceFull {
 
 export interface Config {
   addr: string
+  port: number
   body_limit_bytes: number
   timeout: number
   stream_timeout: number
@@ -203,6 +204,12 @@ export interface Config {
   admin_token: string
   admin_username: string
   admin_password_hash: string
+  /** Write-only: set to change the password (server hashes + clears it). */
+  admin_password?: string
+  /** Explicit login switch; absent = enabled iff a password hash exists. */
+  login_enabled?: boolean
+  /** Read-only hint from GET /config. */
+  password_set?: boolean
   admin_rate_per_minute: number
   admin_allow_ips: string[]
   metrics_token: string

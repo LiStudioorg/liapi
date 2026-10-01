@@ -60,12 +60,18 @@ func (a *Admin) SetSessionTTL(d time.Duration) {
 	}
 }
 
+// LoginEnabled reports whether username/password login is currently on
+// (explicit login_enabled switch, or "a password is set" when unset).
+func (a *Admin) LoginEnabled() bool {
+	return a.holder.Get().LoginAllowed()
+}
+
 // Login validates username/password against the configured admin credentials
 // and, on success, returns a fresh session token. The second result is false
-// when the credentials are wrong or no password login is configured.
+// when the credentials are wrong or password login is not configured/enabled.
 func (a *Admin) Login(username, password string) (string, bool) {
 	cfg := a.holder.Get()
-	if cfg.AdminPasswordHash == "" {
+	if !cfg.LoginAllowed() || cfg.AdminPasswordHash == "" {
 		return "", false
 	}
 	if !common.TokenEqual(cfg.AdminUsername, strings.TrimSpace(username)) {

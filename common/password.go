@@ -118,7 +118,8 @@ func IsPasswordHash(s string) bool {
 }
 
 // RandomPassword returns a URL-safe random password (base64 of 18 bytes).
-// Used to seed the first-run admin credentials.
+// liapi never auto-generates credentials; this is a standalone utility (e.g.
+// for scripts that provision a config).
 func RandomPassword() string {
 	b := make([]byte, 18)
 	if _, err := rand.Read(b); err != nil {
