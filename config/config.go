@@ -142,7 +142,6 @@ type Config struct {
 	ProbeConcurrency   int      `json:"probe_concurrency"`
 	HealthStateFile    string   `json:"health_state_file"`
 	SkipUnhealthy      bool     `json:"skip_unhealthy"`
-	AdminToken         string   `json:"admin_token"`
 	AdminUsername      string   `json:"admin_username"`
 	AdminPasswordHash  string   `json:"admin_password_hash"`
 	// AdminPassword is a write-only convenience field: set it (in the JSON
@@ -383,9 +382,6 @@ func (c *Config) Validate() error {
 		}
 	}
 
-	if c.AdminToken == "" {
-		c.AdminToken = common.RandomToken("adm-")
-	}
 	if strings.TrimSpace(c.AdminUsername) == "" {
 		c.AdminUsername = "admin"
 	}

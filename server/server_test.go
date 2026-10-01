@@ -24,14 +24,12 @@ func newTestServer(t *testing.T, mutate func(*config.Config)) (*Server, *config.
 	path := filepath.Join(dir, "config.json")
 
 	cfg := &config.Config{
-		AdminToken:         "adm-secret-0123456789",
 		ClientTokens:       []string{"sk-client-0123456789"},
 		RateLimitPerMinute: 0,
 		HealthStateFile:    filepath.Join(dir, "health_state.json"),
 		LogFile:            filepath.Join(dir, "relay.jsonl"),
 	}
 	cfg.SetDefaults()
-	cfg.AdminToken = "adm-secret-0123456789"
 	cfg.ClientTokens = []string{"sk-client-0123456789"}
 	cfg.Devices = nil
 	if mutate != nil {
@@ -242,16 +240,25 @@ func TestDeviceLifecycleAndAuth(t *testing.T) {
 }
 
 func TestMetricsAuth(t *testing.T) {
-	// No metrics_token → admin token required.
+	// No metrics_token → the metrics endpoint follows the console gate, which
+	// is open while login is disabled.
 	srv, _ := newTestServer(t, nil)
 	h := srv.Handler()
 	rec := do(h, "GET", "/metrics", "", "")
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("metrics without token: want 401, got %d", rec.Code)
-	}
-	rec = do(h, "GET", "/metrics", adminTok, "")
 	if rec.Code != http.StatusOK {
-		t.Fatalf("metrics with admin token: want 200, got %d", rec.Code)
+		t.Fatalf("metrics on an open console: want 200, got %d", rec.Code)
+	}
+	// Once login is enabled the gate closes and /metrics needs a session.
+	hash, err := common.HashPassword("sup3r-secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gatedSrv, _ := newTestServer(t, func(c *config.Config) {
+		c.AdminUsername = "root"
+		c.AdminPasswordHash = hash
+	})
+	if rec := do(gatedSrv.Handler(), "GET", "/metrics", "", ""); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("metrics without credential while login enabled: want 401, got %d", rec.Code)
 	}
 	if !strings.Contains(rec.Body.String(), "liapi_requests_total") {
 		t.Fatalf("metrics body missing counters: %s", rec.Body.String())
@@ -264,9 +271,9 @@ func TestMetricsAuth(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("metrics with metrics_token: got %d", rec.Code)
 	}
-	rec = do(h2, "GET", "/metrics", adminTok, "")
-	if rec.Code != http.StatusOK {
-		t.Fatalf("metrics_token set: admin token should still work, got %d", rec.Code)
+	rec = do(h2, "GET", "/metrics", "not-the-metrics-token", "")
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("metrics_token set: a wrong credential must not pass, got %d", rec.Code)
 	}
 
 	// Open mode "-".
@@ -308,8 +315,8 @@ func TestConfigMaskedRoundtripKeepsSecrets(t *testing.T) {
 	if live.Upstreams[0].APIKey != "sk-upstream-real-key" {
 		t.Fatalf("masked api_key was not restored: %q", live.Upstreams[0].APIKey)
 	}
-	if live.AdminToken != adminTok {
-		t.Fatalf("admin token clobbered by masked roundtrip: %q", live.AdminToken)
+	if strings.Contains(rec.Body.String(), `"admin_token"`) {
+		t.Fatal("GET config must not expose an admin token field")
 	}
 	// File on disk still has the real key.
 	data, err := os.ReadFile(srv.configPath)
@@ -348,10 +355,18 @@ func TestOneAPIImportEndpoint(t *testing.T) {
 	if len(holder.Get().Upstreams) != 1 || holder.Get().Upstreams[0].BaseURL != "https://api.openai.com/v1" {
 		t.Fatalf("oneapi upstreams not applied: %+v", holder.Get().Upstreams)
 	}
-	// Non-admin rejected.
-	rec = do(h, "POST", "/admin/api/config/import?format=oneapi", "wrong", body)
+	// Non-admin rejected — only meaningful once login is enabled.
+	hash, err := common.HashPassword("sup3r-secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv2, _ := newTestServer(t, func(c *config.Config) {
+		c.AdminUsername = "root"
+		c.AdminPasswordHash = hash
+	})
+	rec = do(srv2.Handler(), "POST", "/admin/api/config/import?format=oneapi", "wrong", body)
 	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("want 401 without admin token, got %d", rec.Code)
+		t.Fatalf("want 401 without a session while login is enabled, got %d", rec.Code)
 	}
 }
 
@@ -389,14 +404,19 @@ func TestStatsEndpoints(t *testing.T) {
 }
 
 func TestConfigExportEndpoint(t *testing.T) {
-	srv, _ := newTestServer(t, nil)
+	srv, _ := newTestServer(t, func(c *config.Config) {
+		c.Upstreams = []config.Upstream{{
+			Name: "up1", BaseURL: "https://api.openai.com/v1", APIKey: "sk-upstream-real-key",
+			Models: []string{"gpt-4o"},
+		}}
+	})
 	h := srv.Handler()
 	rec := do(h, "GET", "/admin/api/config/export", adminTok, "")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("export: %d", rec.Code)
 	}
-	if !strings.Contains(rec.Body.String(), adminTok) {
-		t.Fatal("export must include real admin token (admin-gated backup)")
+	if !strings.Contains(rec.Body.String(), "sk-upstream-real-key") {
+		t.Fatal("export must include real upstream keys (admin-gated backup)")
 	}
 	// Roundtrip the exported bytes through import.
 	rec2 := do(h, "POST", "/admin/api/config/import", adminTok, rec.Body.String())
@@ -454,10 +474,10 @@ func TestAdminLoginFlow(t *testing.T) {
 		t.Fatalf("post-logout want 401, got %d", rec.Code)
 	}
 
-	// Static admin token still works for automation.
-	rec = do(h, "GET", "/admin/api/me", adminTok, "")
-	if rec.Code != http.StatusOK {
-		t.Fatalf("static token want 200, got %d", rec.Code)
+	// While login is enabled, anonymous access stays refused.
+	rec = do(h, "GET", "/admin/api/me", "", "")
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("anonymous while login enabled: want 401, got %d", rec.Code)
 	}
 }
 
@@ -489,18 +509,16 @@ func TestAdminLoginDisabled(t *testing.T) {
 		t.Fatalf("login while disabled want 403, got %d", rec.Code)
 	}
 
-	// Static admin token still unlocks the console.
-	rec = do(h, "GET", "/admin/api/me", adminTok, "")
+	// The console is open on a fresh install: no credential needed.
+	rec = do(h, "GET", "/admin/api/me", "", "")
 	if rec.Code != http.StatusOK {
-		t.Fatalf("static token want 200, got %d", rec.Code)
+		t.Fatalf("open console want 200, got %d", rec.Code)
 	}
 
 	// Setting a plaintext admin_password through the config API hashes it and
 	// turns login on; the plaintext never appears in GET /config.
-	// The payload keeps the current admin token (a full replace without one
-	// would rotate it).
-	rec = do(h, "POST", "/admin/api/config", adminTok,
-		`{"admin_token":"`+adminTok+`","admin_username":"myuser","admin_password":"hunter2-proper","login_enabled":true}`)
+	rec = do(h, "POST", "/admin/api/config", "",
+		`{"admin_username":"myuser","admin_password":"hunter2-proper","login_enabled":true}`)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("set password want 200, got %d %s", rec.Code, rec.Body.String())
 	}
@@ -519,9 +537,16 @@ func TestAdminLoginDisabled(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("login after opt-in want 200, got %d %s", rec.Code, rec.Body.String())
 	}
+	var sess struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &sess); err != nil || sess.Token == "" {
+		t.Fatalf("login response: %s", rec.Body.String())
+	}
 
-	// GET /config never leaks the plaintext or the raw hash.
-	rec = do(h, "GET", "/admin/api/config", adminTok, "")
+	// GET /config never leaks the plaintext or the raw hash. Login is on now,
+	// so this needs the session.
+	rec = do(h, "GET", "/admin/api/config", sess.Token, "")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("get config want 200, got %d", rec.Code)
 	}

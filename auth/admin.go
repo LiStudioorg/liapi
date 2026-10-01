@@ -164,32 +164,28 @@ func (a *Admin) ClearFailures(ip string) {
 }
 
 // Credential extracts the admin credential from the request, checking:
-//  1. Authorization: Bearer <token>
-//  2. x-admin-token: <token>
-//  3. ?token=<token>
+//  1. Authorization: Bearer <session-token>
+//  2. ?token=<session-token>   (handy for scrapers/bookmarks)
 func (a *Admin) Credential(r *http.Request) string {
 	if t := bearerFromHeader(r.Header.Get("Authorization")); t != "" {
-		return t
-	}
-	if t := strings.TrimSpace(r.Header.Get("x-admin-token")); t != "" {
 		return t
 	}
 	return strings.TrimSpace(r.URL.Query().Get("token"))
 }
 
-// Authenticate accepts either a live login session token or the static
-// admin token. The admin token remains valid for /metrics and automation.
+// Authenticate reports whether the request is allowed to reach the admin API.
+//
+// When username/password login is switched off (the default on a fresh
+// install) the console is open: whoever can reach the port is the operator,
+// and the IP allowlist is the only gate. Once login_enabled=true, a live
+// login session is the only accepted credential.
 func (a *Admin) Authenticate(r *http.Request) bool {
+	if !a.holder.Get().LoginAllowed() {
+		return true
+	}
 	t := a.Credential(r)
 	if t == "" {
 		return false
 	}
-	if strings.HasPrefix(t, "sess-") {
-		return a.sessionValid(t)
-	}
-	cfg := a.holder.Get()
-	if cfg.AdminToken == "" {
-		return false
-	}
-	return common.TokenEqual(cfg.AdminToken, t)
+	return a.sessionValid(t)
 }

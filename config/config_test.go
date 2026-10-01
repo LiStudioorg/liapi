@@ -30,7 +30,6 @@ func TestDurationJSON(t *testing.T) {
 func validConfig() *Config {
 	c := &Config{}
 	c.SetDefaults()
-	c.AdminToken = "adm-x"
 	c.ClientTokens = []string{"sk-a", "sk-a", " sk-b ", ""}
 	c.Upstreams = []Upstream{
 		{Name: "A", BaseURL: "https://api.openai.com/v1", APIKey: "k", Models: []string{"gpt-4o"}},

@@ -13,9 +13,6 @@ import (
 
 func testRelay(cfg *config.Config) (*Relay, *config.Holder) {
 	cfg.SetDefaults()
-	if cfg.AdminToken == "" {
-		cfg.AdminToken = "adm-x"
-	}
 	h := config.NewHolder(cfg)
 	return New(h), h
 }

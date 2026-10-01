@@ -249,7 +249,8 @@ func ipAllowed(ip string, allow []string) bool {
 }
 
 // requireAdmin enforces: IP allowlist → lockout → admin rate limit → admin
-// token. Every attempt is recorded in the audit ring.
+// credential. The credential check is a no-op while login is disabled (open
+// console). Every attempt is recorded in the audit ring.
 func (s *Server) requireAdmin(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		cfg := s.holder.Get()

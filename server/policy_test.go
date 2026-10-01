@@ -1,11 +1,13 @@
 package server
 
 import (
+	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
 	"time"
 
+	"liapi/common"
 	"liapi/config"
 )
 
@@ -70,15 +72,35 @@ func TestTokenPolicyRPM(t *testing.T) {
 	}
 }
 
-// TestAdminLockout locks an IP after repeated bad admin tokens.
+// TestAdminLockout locks an IP after repeated bad credentials. Lockout only
+// exists once login is enabled — the open console has nothing to brute force.
 func TestAdminLockout(t *testing.T) {
-	srv, _ := newTestServer(t, nil)
+	hash, err := common.HashPassword("sup3r-secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv, _ := newTestServer(t, func(c *config.Config) {
+		c.AdminUsername = "root"
+		c.AdminPasswordHash = hash
+	})
 	h := srv.Handler()
-	// 5 bad attempts trigger lockout; 6th (even with good token) is locked.
+	// Log in first: a session established before the lockout is still blocked
+	// once the IP is locked.
+	rec := do(h, "POST", "/admin/api/login", "", `{"username":"root","password":"sup3r-secret"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("login: %d %s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	// 5 bad attempts trigger lockout.
 	for i := 0; i < 6; i++ {
 		do(h, "GET", "/admin/api/overview", "wrong-token", "")
 	}
-	rec := do(h, "GET", "/admin/api/overview", adminTok, "")
+	rec = do(h, "GET", "/admin/api/overview", out.Token, "")
 	if rec.Code != http.StatusTooManyRequests {
 		t.Fatalf("want 429 locked out after failures, got %d %s", rec.Code, rec.Body.String())
 	}
@@ -89,18 +111,47 @@ func TestAdminLockout(t *testing.T) {
 
 // TestAdminAuditRecordsEvents exposes the audit ring via the admin API.
 func TestAdminAuditRecordsEvents(t *testing.T) {
-	srv, _ := newTestServer(t, nil)
+	hash, err := common.HashPassword("sup3r-secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv, _ := newTestServer(t, func(c *config.Config) {
+		c.AdminUsername = "root"
+		c.AdminPasswordHash = hash
+	})
 	h := srv.Handler()
-	// One failed + one successful attempt.
+	// One rejected + one accepted attempt.
 	do(h, "GET", "/admin/api/overview", "bad", "")
-	do(h, "GET", "/admin/api/overview", adminTok, "")
-	rec := do(h, "GET", "/admin/api/audit?n=10", adminTok, "")
+	rec := do(h, "POST", "/admin/api/login", "", `{"username":"root","password":"sup3r-secret"}`)
+	var out struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil || out.Token == "" {
+		t.Fatalf("login: %d %s", rec.Code, rec.Body.String())
+	}
+	do(h, "GET", "/admin/api/overview", out.Token, "")
+	rec = do(h, "GET", "/admin/api/audit?n=10", out.Token, "")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("audit: %d", rec.Code)
 	}
 	body := rec.Body.String()
 	if !strings.Contains(body, `"ok":false`) || !strings.Contains(body, `"ok":true`) {
 		t.Fatalf("audit should contain both failed and successful events: %s", body)
+	}
+}
+
+// TestOpenConsoleHasNoLockout: while login is disabled the console is open, so
+// junk credentials must neither be rejected nor lock the operator out.
+func TestOpenConsoleHasNoLockout(t *testing.T) {
+	srv, _ := newTestServer(t, nil)
+	h := srv.Handler()
+	for i := 0; i < 8; i++ {
+		if rec := do(h, "GET", "/admin/api/overview", "wrong-token", ""); rec.Code != http.StatusOK {
+			t.Fatalf("open console attempt %d: want 200, got %d", i, rec.Code)
+		}
+	}
+	if rec := do(h, "GET", "/admin/api/overview", "", ""); rec.Code != http.StatusOK {
+		t.Fatalf("open console without credentials: want 200, got %d", rec.Code)
 	}
 }
 

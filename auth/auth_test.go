@@ -100,12 +100,10 @@ func TestAdminLoginAndSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := &config.Config{
-		AdminToken:        "adm-static-token",
 		AdminUsername:     "alice",
 		AdminPasswordHash: hash,
 	}
 	cfg.SetDefaults()
-	cfg.AdminToken = "adm-static-token"
 	cfg.AdminUsername = "alice"
 	cfg.AdminPasswordHash = hash
 	h := config.NewHolder(cfg)
@@ -130,11 +128,10 @@ func TestAdminLoginAndSession(t *testing.T) {
 		t.Fatal("session token should authenticate")
 	}
 
-	// Static admin token still works (for /metrics and scripts).
-	r2 := httptest.NewRequest("GET", "/metrics", nil)
-	r2.Header.Set("x-admin-token", "adm-static-token")
-	if !a.Authenticate(r2) {
-		t.Fatal("static admin token should still authenticate")
+	// Anonymous access is refused while login is enabled.
+	r0 := httptest.NewRequest("GET", "/admin/api/overview", nil)
+	if a.Authenticate(r0) {
+		t.Fatal("anonymous request must not authenticate once login is enabled")
 	}
 
 	// Unknown/garbage token rejected.
@@ -148,6 +145,29 @@ func TestAdminLoginAndSession(t *testing.T) {
 	a.Logout(tok)
 	if a.Authenticate(r) {
 		t.Fatal("logged-out session must fail")
+	}
+}
+
+// TestOpenConsoleWhenLoginDisabled: with no username/password configured the
+// admin surface is open — anonymous requests authenticate, which is what makes
+// the console reachable without any token.
+func TestOpenConsoleWhenLoginDisabled(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.SetDefaults()
+	a := NewAdmin(config.NewHolder(cfg))
+
+	for _, target := range []string{"/admin/api/overview", "/metrics"} {
+		r := httptest.NewRequest("GET", target, nil)
+		if !a.Authenticate(r) {
+			t.Fatalf("%s must be reachable while login is disabled", target)
+		}
+	}
+	// A garbage credential is still meaningless, but it does not lock anyone
+	// out: the open gate ignores credentials entirely.
+	r := httptest.NewRequest("GET", "/admin/api/overview", nil)
+	r.Header.Set("Authorization", "Bearer sess-garbage")
+	if !a.Authenticate(r) {
+		t.Fatal("open console must not reject requests carrying junk credentials")
 	}
 }
 

@@ -42,10 +42,10 @@ func TestAdminUIServesSPA(t *testing.T) {
 		}
 	})
 
-	t.Run("admin api still requires auth", func(t *testing.T) {
+	t.Run("admin api is open while login is disabled", func(t *testing.T) {
 		rec := serve(srv, newRequest("GET", "/admin/api/overview", "", ""))
-		if rec.Code != http.StatusUnauthorized {
-			t.Fatalf("status = %d, want 401", rec.Code)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 (open console)", rec.Code)
 		}
 	})
 }

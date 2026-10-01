@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"liapi/auth"
-	"liapi/common"
 	"liapi/config"
 	"liapi/relay"
 	"liapi/routing"
@@ -27,32 +26,24 @@ import (
 var version = "dev"
 
 // printAdminBanner surfaces how to reach the admin UI. No credentials are
-// ever generated: fresh installs ship with login disabled until the user
-// sets login_enabled + a password themselves. The static admin token is
-// printed as the default way into the console (masked with
-// LIAPI_MASK_ADMIN_TOKEN=1).
+// ever generated: the console opens directly, and stays open until the user
+// enables username/password login themselves.
 func printAdminBanner(cfg *config.Config, configPath string) {
 	addr := cfg.ListenAddr()
 	display := addr
 	if h, p := cfg.HostPort(); h == "" || h == "0.0.0.0" || h == "::" {
 		display = "localhost:" + itoa(p)
 	}
-	token := cfg.AdminToken
-	if os.Getenv("LIAPI_MASK_ADMIN_TOKEN") == "1" {
-		token = common.MaskToken(cfg.AdminToken) + "  (已脱敏；完整值见 " + configPath + ")"
-	}
 	const bar = "════════════════════════════════════════════════════════════════"
 	lines := []string{
-		"  管理台        http://" + display + "/",
-		"  Admin Token :  " + token,
-		"  （用 Token 登录管理台：打开页面后直接输入 Token；日常自动化脚本也可用）",
+		"  管理台        http://" + display + "/   （直接打开，无需 Token）",
 		"  配置文件      " + configPath,
 	}
 	if !cfg.LoginAllowed() {
 		lines = append(lines,
 			"",
-			"  用户名/密码登录：未启用。",
-			"  想用自己写的账号密码登录，编辑配置文件：",
+			"  当前未启用登录：能访问该端口的人即可管理网关。",
+			"  想加一道门，编辑配置文件（或管理台「系统设置」）：",
 			`    "login_enabled": true,`,
 			`    "admin_username": "你的用户名",`,
 			`    "admin_password": "你的密码"      ← 保存后自动转为哈希，明文不再保留`,

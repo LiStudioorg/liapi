@@ -751,9 +751,6 @@ func (s *Server) adminGetConfig(w http.ResponseWriter, r *http.Request) {
 			cfg.Upstreams[i].APIKey = common.MaskToken(cfg.Upstreams[i].APIKey)
 		}
 	}
-	if cfg.AdminToken != "" {
-		cfg.AdminToken = common.MaskToken(cfg.AdminToken)
-	}
 	if cfg.AdminPasswordHash != "" {
 		cfg.AdminPasswordHash = common.MaskToken(cfg.AdminPasswordHash)
 	}
@@ -880,7 +877,8 @@ func (s *Server) adminStatsDevices(w http.ResponseWriter, r *http.Request) {
 // Auth precedence:
 //  1. metrics_token == "-"  → open (no auth; explicit opt-in for local scrapes)
 //  2. metrics_token set    → that token (query ?token=, Bearer, or x-metrics-token)
-//  3. otherwise            → admin token (Authorization or x-admin-token)
+//  3. otherwise            → the admin console gate (open while login is
+//     disabled; a live login session once login_enabled=true)
 func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	cfg := s.holder.Get()
 	switch {
@@ -895,8 +893,11 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 			tok = r.Header.Get("x-metrics-token")
 		}
 		ok := common.TokenEqual(cfg.MetricsToken, tok)
-		if !ok && tok != "" {
-			// Admin token remains a valid credential for /metrics.
+		if !ok && tok == "" {
+			// No metrics credential supplied: fall back to the admin console
+			// gate, so an operator can scrape /metrics from the browser session
+			// while login is enabled — and while login is disabled the gate is
+			// open. A wrong token is never silently upgraded.
 			ok = s.adminAuth.Authenticate(r)
 		}
 		if !ok {
@@ -921,16 +922,13 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 // resolveMaskedSecrets restores any redacted secret in next (values
 // containing "...", as produced by MaskToken/hintHash) from the live config.
 // This makes round-tripping GET /admin/api/config → edit → POST safe: masked
-// api_key/admin_token/client_tokens/device hashes keep their real values.
+// api_key/client_tokens/device hashes keep their real values.
 func resolveMaskedSecrets(old, next *config.Config) {
 	if old == nil || next == nil {
 		return
 	}
 	isMasked := func(s string) bool { return strings.Contains(s, "...") }
 
-	if isMasked(next.AdminToken) {
-		next.AdminToken = old.AdminToken
-	}
 	if isMasked(next.AdminPasswordHash) {
 		next.AdminPasswordHash = old.AdminPasswordHash
 	}
