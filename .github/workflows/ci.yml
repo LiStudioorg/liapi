@@ -5,9 +5,42 @@ on:
     branches: ['**']
   pull_request:
 
+permissions:
+  contents: write
+
 jobs:
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build admin SPA
+        run: npm run build
+
+      # Hand the freshly built assets to the Go job so embedding is verified
+      # against current sources (the committed copy is only a fallback).
+      - uses: actions/upload-artifact@v4
+        with:
+          name: adminui
+          path: server/adminui
+          if-no-files-found: error
+
   test:
     runs-on: ubuntu-latest
+    needs: frontend
     steps:
       - uses: actions/checkout@v4
 
@@ -15,6 +48,12 @@ jobs:
         with:
           go-version: 'stable'
           cache: true
+
+      - name: Use freshly built admin UI
+        uses: actions/download-artifact@v4
+        with:
+          name: adminui
+          path: server/adminui
 
       - name: Format check
         run: |
@@ -31,3 +70,80 @@ jobs:
 
       - name: Build
         run: go build ./...
+
+  # ── 自动发布：仅当 beta 分支上 CI 全绿时触发 ───────────
+  # 固定 tag `beta-latest`，每次成功都覆盖为该提交的构建产物；
+  # 作为正式 Release 发布（非 prerelease）。
+  # 注意：不依赖 workflow_run（那要求工作流先在默认分支 main 上存在）。
+  publish:
+    needs: [frontend, test]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/beta'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: false
+
+      - name: Use freshly built admin UI
+        uses: actions/download-artifact@v4
+        with:
+          name: adminui
+          path: server/adminui
+
+      - name: Build release binaries
+        env:
+          ENABLE_VERSION_INJECT: '1'
+          VERSION: beta-${{ github.sha }}
+        run: |
+          chmod +x buildrelease.sh
+          # Build a practical subset (fast, most-used platforms); the full
+          # matrix (Android/iOS included) is reserved for tagged releases.
+          mkdir -p dist
+          ok=0
+          for T in linux/amd64 linux/arm64 windows/amd64 windows/arm64 darwin/amd64 darwin/arm64; do
+            if ./buildrelease.sh "$T"; then ok=$((ok+1)); else echo "skip $T"; fi
+          done
+          echo "built=$ok"
+          test "$ok" -gt 0 || { echo "no binaries built"; exit 1; }
+
+      - name: Generate checksums
+        run: |
+          cd dist
+          sha256sum * > checksums.txt
+          echo "共 $(ls | wc -l) 个文件"
+          ls -lh
+
+      # The rolling tag keeps one release; drop previous assets so the
+      # release always reflects only the newest successful build.
+      - name: Clean previous release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view beta-latest --json assets \
+            --jq '.assets[].name' 2>/dev/null | while read -r name; do
+            [ -n "$name" ] && gh release delete-asset beta-latest "$name" -y || true
+          done
+
+      - name: Publish beta release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: beta-latest
+          name: Beta build ${{ github.sha }}
+          target_commitish: ${{ github.sha }}
+          prerelease: false
+          draft: false
+          make_latest: false
+          files: dist/*
+          generate_release_notes: true
+          body: |
+            Automated release from the `beta` branch.
+
+            - Commit: `${{ github.sha }}`
+            - Version injected into binaries: `beta-${{ github.sha }}`
+            - Built by CI run ${{ github.run_id }}
+
+            ⚠️ Rolling build tracked to the `beta` branch. For production use,
+            prefer a versioned release.

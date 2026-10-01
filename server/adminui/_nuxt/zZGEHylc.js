@@ -1,0 +1,1 @@
+function e(e){let t=Number(e||0);return t>=1e9?(t/1e9).toFixed(2)+`B`:t>=1e6?(t/1e6).toFixed(2)+`M`:t>=1e3?(t/1e3).toFixed(2)+`K`:String(t)}function t(e){return Number(e||0).toFixed(4)}function n(e){return e?e.length>=19?e.slice(11,19):e:`-`}function r(e){return e>=200&&e<300?`success`:e>=400&&e<500?`warning`:`danger`}export{r as i,e as n,n as r,t};

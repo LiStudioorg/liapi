@@ -2,6 +2,7 @@ package auth
 
 import (
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -13,6 +14,9 @@ const (
 	defaultLockoutFailures = 5
 	defaultLockoutWindow   = 5 * time.Minute
 	defaultLockoutDuration = 15 * time.Minute
+
+	// defaultSessionTTL bounds how long a login session stays valid.
+	defaultSessionTTL = 12 * time.Hour
 )
 
 type lockState struct {
@@ -21,17 +25,92 @@ type lockState struct {
 	lockedUntil time.Time
 }
 
-// Admin validates the separate admin token used for /admin/api/*, with
-// per-IP lockout after repeated failures (brute-force protection).
+type session struct {
+	username  string
+	expiresAt time.Time
+}
+
+// Admin validates access to /admin/api/* and the admin UI.
+//
+// Two credentials are accepted:
+//   - a browser login session token (issued by Login, short-lived), and
+//   - the static admin_token from config (kept for /metrics and scripts).
 type Admin struct {
 	holder *config.Holder
 
-	mu    sync.Mutex
-	locks map[string]*lockState
+	mu       sync.Mutex
+	locks    map[string]*lockState
+	sessions map[string]*session
+	ttl      time.Duration
 }
 
 func NewAdmin(holder *config.Holder) *Admin {
-	return &Admin{holder: holder, locks: make(map[string]*lockState)}
+	return &Admin{
+		holder:   holder,
+		locks:    make(map[string]*lockState),
+		sessions: make(map[string]*session),
+		ttl:      defaultSessionTTL,
+	}
+}
+
+// SetSessionTTL overrides the default session lifetime (tests, tuning).
+func (a *Admin) SetSessionTTL(d time.Duration) {
+	if d > 0 {
+		a.ttl = d
+	}
+}
+
+// Login validates username/password against the configured admin credentials
+// and, on success, returns a fresh session token. The second result is false
+// when the credentials are wrong or no password login is configured.
+func (a *Admin) Login(username, password string) (string, bool) {
+	cfg := a.holder.Get()
+	if cfg.AdminPasswordHash == "" {
+		return "", false
+	}
+	if !common.TokenEqual(cfg.AdminUsername, strings.TrimSpace(username)) {
+		return "", false
+	}
+	if !common.VerifyPassword(cfg.AdminPasswordHash, password) {
+		return "", false
+	}
+	tok := common.RandomToken("sess-")
+	now := time.Now()
+	a.mu.Lock()
+	// Opportunistically drop expired sessions so the map stays bounded.
+	for k, s := range a.sessions {
+		if now.After(s.expiresAt) {
+			delete(a.sessions, k)
+		}
+	}
+	a.sessions[tok] = &session{username: cfg.AdminUsername, expiresAt: now.Add(a.ttl)}
+	a.mu.Unlock()
+	return tok, true
+}
+
+// Logout invalidates a session token (no-op if unknown).
+func (a *Admin) Logout(token string) {
+	a.mu.Lock()
+	delete(a.sessions, token)
+	a.mu.Unlock()
+}
+
+// sessionValid reports whether token is a live login session.
+func (a *Admin) sessionValid(token string) bool {
+	if token == "" {
+		return false
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	s := a.sessions[token]
+	if s == nil {
+		return false
+	}
+	if time.Now().After(s.expiresAt) {
+		delete(a.sessions, token)
+		return false
+	}
+	return true
 }
 
 // Locked reports whether ip is currently locked out (and for how long).
@@ -78,16 +157,32 @@ func (a *Admin) ClearFailures(ip string) {
 	a.mu.Unlock()
 }
 
+// Credential extracts the admin credential from the request, checking:
+//  1. Authorization: Bearer <token>
+//  2. x-admin-token: <token>
+//  3. ?token=<token>
+func (a *Admin) Credential(r *http.Request) string {
+	if t := bearerFromHeader(r.Header.Get("Authorization")); t != "" {
+		return t
+	}
+	if t := strings.TrimSpace(r.Header.Get("x-admin-token")); t != "" {
+		return t
+	}
+	return strings.TrimSpace(r.URL.Query().Get("token"))
+}
+
+// Authenticate accepts either a live login session token or the static
+// admin token. The admin token remains valid for /metrics and automation.
 func (a *Admin) Authenticate(r *http.Request) bool {
-	cfg := a.holder.Get()
-	if cfg.AdminToken == "" {
+	t := a.Credential(r)
+	if t == "" {
 		return false
 	}
-	t := bearerFromHeader(r.Header.Get("Authorization"))
-	if t == "" {
-		t = r.Header.Get("x-admin-token")
+	if strings.HasPrefix(t, "sess-") {
+		return a.sessionValid(t)
 	}
-	if t == "" {
+	cfg := a.holder.Get()
+	if cfg.AdminToken == "" {
 		return false
 	}
 	return common.TokenEqual(cfg.AdminToken, t)

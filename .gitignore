@@ -8,3 +8,11 @@
 **/health_state.json
 **/relay.jsonl*
 /android-ndk-*/
+
+# Nuxt admin SPA (web/) — build artifacts only; source is committed.
+/web/node_modules/
+/web/.nuxt/
+/web/.output/
+/web/dist/
+/web/node_modules/.cache/
+*.tsbuildinfo

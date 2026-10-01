@@ -16,7 +16,7 @@ import (
 	"liapi/stats"
 )
 
-//go:embed adminui/index.html
+//go:embed all:adminui
 var ui embed.FS
 
 type Server struct {
@@ -128,19 +128,22 @@ func (s *Server) Handler() http.Handler {
 	// Observability (metrics token OR admin token)
 	mux.HandleFunc("GET /metrics", s.handleMetrics)
 
-	// Admin UI at / (primary); /admin kept as redirect for old bookmarks.
+	// Admin UI: a Nuxt-generated static SPA embedded in the binary.
+	//   /               → index.html
+	//   /_nuxt/<asset>  → hashed JS/CSS from the build
+	//   /<client-route> → index.html (client-side router handles it)
+	//   /admin, /admin/ → 301 to /
+	// The moar-specific /admin/api/* and /v1/* patterns below take precedence.
 	mux.HandleFunc("GET /{$}", s.adminUI)
 	mux.HandleFunc("GET /admin", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/", http.StatusMovedPermanently)
 	})
 	mux.HandleFunc("GET /admin/", func(w http.ResponseWriter, r *http.Request) {
-		// Only exact /admin/ (no API path) → redirect; API falls through below.
-		if r.URL.Path == "/admin/" {
-			http.Redirect(w, r, "/", http.StatusMovedPermanently)
-			return
-		}
-		s.adminUI(w, r)
+		http.Redirect(w, r, "/", http.StatusMovedPermanently)
 	})
+	mux.HandleFunc("POST /admin/api/login", s.adminLogin)
+	mux.HandleFunc("POST /admin/api/logout", s.requireAdmin(s.adminLogout))
+	mux.HandleFunc("GET /admin/api/me", s.requireAdmin(s.adminMe))
 	mux.HandleFunc("GET /admin/api/overview", s.requireAdmin(s.adminOverview))
 	mux.HandleFunc("GET /admin/api/upstreams", s.requireAdmin(s.adminListUpstreams))
 	mux.HandleFunc("POST /admin/api/upstreams", s.requireAdmin(s.adminAddUpstream))
@@ -167,6 +170,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /admin/api/stats", s.requireAdmin(s.adminStats))
 	mux.HandleFunc("GET /admin/api/stats/export", s.requireAdmin(s.adminStatsExport))
 	mux.HandleFunc("GET /admin/api/stats/devices", s.requireAdmin(s.adminStatsDevices))
+
+	// SPA catch-all: static assets + any client-side route fall back to the
+	// embedded index.html. Registered last; every more-specific pattern above
+	// (including all /v1/*, /metrics and /admin/api/*) wins over this.
+	mux.HandleFunc("GET /", s.adminUI)
 
 	// Request-ID middleware: echo X-Request-ID (generate when absent) on
 	// every response so clients/logs/upstream headers correlate.

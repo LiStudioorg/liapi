@@ -22,6 +22,26 @@ import (
 // version is overridden at link time by buildrelease.sh (-X main.version=…).
 var version = "dev"
 
+// printAdminBanner surfaces how to log in to the admin UI. The login account
+// is username/password; on first run the generated password is shown once here
+// (it is never stored in plaintext). The static admin token is also printed as
+// a fallback credential for /metrics and automation.
+func printAdminBanner(cfg *config.Config, configPath string) {
+	token := cfg.AdminToken
+	if os.Getenv("LIAPI_MASK_ADMIN_TOKEN") == "1" {
+		token = common.MaskToken(cfg.AdminToken) + "  (masked; see " + configPath + ")"
+	}
+	pw := "(unchanged — set via 管理台 配置页)"
+	if cfg.FirstRunPassword != "" {
+		pw = cfg.FirstRunPassword + "  (首次生成，仅显示这一次)"
+	} else if os.Getenv("LIAPI_MASK_ADMIN_TOKEN") == "1" {
+		pw = "(masked; reset via config)"
+	}
+	const bar = "════════════════════════════════════════════════════════════════"
+	log.Printf("\n%s\n  Liapi 管理台  http://<host>%s/\n\n  登录入口    http://<host>%s/\n  用户名      %s\n  密码        %s\n\n  Admin Token :  %s\n  （Token 仅用于 /metrics 与脚本；日常登录用用户名+密码）\n%s",
+		bar, cfg.Addr, cfg.Addr, cfg.AdminUsername, pw, token, bar)
+}
+
 func main() {
 	configPath := flag.String("config", "config.json", "path to config file")
 	showVer := flag.Bool("version", false, "print version and exit")
@@ -39,10 +59,12 @@ func main() {
 	if len(cfg.ClientTokens) == 0 && len(cfg.Devices) == 0 {
 		log.Printf("[warn] no client_tokens/devices configured yet — all /v1/* requests will be rejected")
 	}
-	// Never log raw secrets: mask the admin token.
-	log.Printf("config loaded from %s (admin_token=%s)", *configPath, common.MaskToken(cfg.AdminToken))
 
 	holder := config.NewHolder(cfg)
+
+	log.Printf("config loaded from %s", *configPath)
+	printAdminBanner(cfg, *configPath)
+	cfg.FirstRunPassword = ""
 
 	logger, err := stats.NewLogger(cfg.LogFile, cfg.RingSize, cfg.LogMaxBytes)
 	if err != nil {

@@ -87,7 +87,7 @@ liapi/
 │   └── admin.go             # 管理 token 校验（独立）
 ├── routing/
 │   ├── router.go            # 候选收集 → priority 升序 → 组内加权随机打散
-│   └── aliases.go           # （P2）模型别名 / 参数覆写
+│   └── router_test.go       # 别名 / fallback / 策略 / group 测试
 ├── relay/
 │   ├── relay.go             # 转发主循环（含故障转移 / 重试）
 │   ├── stream.go            # SSE 流式复制（32KB 缓冲 + Flusher）
@@ -97,12 +97,12 @@ liapi/
 │   ├── server.go            # ServeMux 路由注册（Go 1.22 方法路由）
 │   ├── handler_v1.go        # /v1/chat/completions、completions、embeddings、
 │   │                        #   messages、models 的实现
-│   └── handler_admin.go     # /admin/api/*
-├── adminui/
-│   └── index.html           # 单文件管理台（go:embed 打包）
+│   ├── handler_admin.go     # /admin/api/* + SPA 静态托管
+│   └── adminui/             # 管理台构建产物（go:embed all:adminui）
+├── web/                     # 管理台源码（Nuxt 4 + fuxsto-design）
 ├── stats/
 │   ├── logger.go            # JSONL 写文件 + 环形缓冲（数组+取模）
-│   ├── limiter.go           # 固定窗口限流 map[token]{count,reset} + 定期清理
+│   ├── limiter.go           # 滑动窗口限流 + 定期清理
 │   ├── health.go            # 后台探测 goroutine，内存 map 存状态
 │   └── totals.go            # 全量计数/用量/费用的原子聚合
 └── README.md
@@ -135,7 +135,9 @@ liapi/
   "health_state_file": "health_state.json", // 健康状态持久化文件
   "skip_unhealthy": true,                 // 路由时避开不健康上游（可开关）
 
-  "admin_token": "adm-sk-xxxxxxxx",       // 管理接口鉴权（独立）
+  "admin_token": "adm-sk-xxxxxxxx",       // 管理接口鉴权（独立）；保留给 /metrics 与脚本
+  "admin_username": "admin",              // 管理台登录用户名
+  "admin_password_hash": "pbkdf2-sha256$…", // 管理台登录密码（PBKDF2 哈希，不明文存储）
   "admin_rate_per_minute": 60,            // 管理接口按 IP 限流（-1=关闭，0/未设=默认60）
   "admin_allow_ips": [],                  // 管理接口 IP/CIDR 白名单，空=不限
   "metrics_token": "",                    // /metrics 鉴权 token；"-"=内网免鉴权；
@@ -231,6 +233,8 @@ liapi/
 
 | 字段 | 说明 |
 |---|---|
+| `admin_username` / `admin_password_hash` | 管理台登录账号；密码只存 PBKDF2-HMAC-SHA256 加盐哈希，首次运行自动生成并在终端打印一次 |
+| `admin_token` | 静态管理 token，保留给 `/metrics` 与脚本自动化；日常登录改用用户名+密码 |
 | `admin_rate_per_minute` | 管理 API 每 IP 每分钟请求数（防暴力破解）；`-1`=关闭，`0`/未设=默认 60 |
 | `admin_allow_ips` | 管理 API IP/CIDR 白名单；同时用于是否信任 `X-Forwarded-For` |
 | `metrics_token` | `/metrics` 鉴权；`"-"`=免鉴权；未设置=要求 admin token |
@@ -279,7 +283,8 @@ r.Context()
 
 ### 6.2 鉴权细节
 
-- 读取顺序：`Authorization: Bearer <t>` → `x-api-key: <t>` → `?token=<t>`。
+- **管理台登录**：用户名 + 密码。密码以 PBKDF2-HMAC-SHA256（随机盐，21 万次迭代）哈希存储（`admin_password_hash`），登录成功后签发**短期会话 token**（`sess-…`，默认 12 小时），前端存 `localStorage` 并随请求以 `Authorization: Bearer` 发送。退出登录即服务端失效该会话。静态 `admin_token` 仍可用（保留给 `/metrics` 与脚本）。
+- **业务 API**：读取顺序：`Authorization: Bearer <t>` → `x-api-key: <t>` → `?token=<t>`；这些 token 用于调用模型，与登录账号分离。
 - `Bearer` 前缀**大小写不敏感**。
 - 比较用 **SHA-256 摘要 + `crypto/subtle.ConstantTimeCompare`**，避免时序攻击与长度侧信道。
 - token 脱敏：`sk-abc12345xyz` → `sk-ab...xyz` 后再进日志。
@@ -370,11 +375,14 @@ return failAll(lastErr)                       # 502 或透传最后一次的 sta
 
 ### 7.2 管理 API（独立 admin token）
 
-除列表/查看外，管理 API 受 **IP 白名单 + 每 IP 限流（默认 60/min）+ admin token** 三层保护。
+除列表/查看外，管理 API 受 **IP 白名单 + 每 IP 限流（默认 60/min）+ 登录会话或 admin token** 三层保护。
 
 | 路径 | 方法 | 说明 |
 |---|---|---|
-| `/` | GET | 管理台单页（go:embed，含设备/统计/配置编辑）；`/admin` 301 → `/` |
+| `/` | GET | 管理台 SPA（Nuxt 静态构建，go:embed；含设备/统计/配置编辑）；`/admin` 301 → `/` |
+| `/admin/api/login` | POST | 登录：`{username,password}` → 短期会话 token（受 IP 白名单/锁定/限流保护） |
+| `/admin/api/logout` | POST | 退出登录：使当前会话 token 失效 |
+| `/admin/api/me` | GET | 返回当前登录用户名 |
 | `/admin/api/overview` | GET | 请求数 / 成功率 / 平均延迟 / token 量 / 费用 / 故障转移数 |
 | `/admin/api/upstreams` | GET | 上游列表（api_key 脱敏） |
 | `/admin/api/upstreams` | POST | 新增上游 |
@@ -402,7 +410,7 @@ return failAll(lastErr)                       # 502 或透传最后一次的 sta
 | `/admin/api/stats/devices?n=` | GET | 设备用量排行 |
 | `/metrics` | GET | Prometheus 文本格式；`metrics_token`（`"-"`=免鉴权）或 admin token |
 
-管理台前端把 admin token 存 `localStorage`，每次请求带 `Authorization: Bearer <admin_token>`。**管理 token 与客户端 token 严格分离**。
+管理台前端通过独立的 `/login` 登录页输入**用户名 + 密码**（校验通过后服务端签发短期会话 token，存 `localStorage`，每次请求带 `Authorization: Bearer <session>`）；未登录访问任意页面会自动跳转登录页，不使用浏览器原生对话框。**管理登录账号与调用模型的客户端 token 严格分离**：前者只登管理台，后者（`devices[]` / `client_tokens[]`）只用于 `/v1/*` 调用模型。
 
 ### 7.3 部署（Docker）
 
@@ -448,6 +456,11 @@ docker build -t liapi . && docker run -p 8787:8787 -v "$PWD/data:/data" liapi
 ### P1-8 管理台
 
 单 HTML（CSS+JS 内联），`go:embed` 进二进制，零构建。Tabs：概览 / 上游 / 令牌 / 日志 / 调试 / 健康。
+
+> **v2**：管理台已重写为 Nuxt 4 + fuxsto-design 的静态 SPA（源码在 `web/`，
+> 产物在 `server/adminui/`，`go:embed all:adminui` 打包；构建见 `./buildadmin.sh`）。
+> 布局参考 NewApi（侧边栏 + 顶栏 + 页面过渡动画），功能覆盖概览 / 上游 / 令牌 /
+> 设备 / 统计 / 日志 / 健康 / 配置 / 调试。
 
 ### P1-9 配置热重载
 
@@ -532,9 +545,11 @@ docker build -t liapi . && docker run -p 8787:8787 -v "$PWD/data:/data" liapi
 ## 十四、运行方式
 
 ```bash
-# 首次运行自动生成默认 config.json（含随机 admin_token，打印到控制台）
+# 首次运行自动生成默认 config.json（随机 admin_token + 随机 admin 账号密码，
+# 用户名默认为 admin，密码在控制台方框中醒目打印，仅显示这一次）
 go build -o liapi ./...
 ./liapi -config config.json
+# 想隐藏明文（共享日志/录屏）：LIAPI_MASK_ADMIN_TOKEN=1 ./liapi -config config.json
 
 # 冒烟
 curl http://localhost:8787/v1/models -H "Authorization: Bearer sk-client-aaa"
@@ -551,12 +566,15 @@ open http://localhost:8787/
 
 ```
 main.go                     server/handler_v1.go      routing/router.go
-config/config.go            server/handler_admin.go   routing/aliases.go
-config/holder.go            server/server.go          relay/relay.go
-auth/auth.go                stats/logger.go           relay/stream.go
-auth/admin.go               stats/limiter.go          relay/usage.go
-common/errors.go            stats/health.go           relay/http.go
-common/token.go             stats/totals.go           adminui/index.html
+config/config.go            server/handler_admin.go   relay/relay.go
+config/holder.go            server/server.go          relay/stream.go
+config/interop.go           server/requestid.go       relay/usage.go
+auth/auth.go                server/adminui/ (SPA)     relay/http.go
+auth/admin.go               web/ (Nuxt 源码)          stats/logger.go
+common/errors.go            stats/aggregate.go        stats/limiter.go
+common/token.go             stats/metrics.go          stats/quota.go
+stats/health.go             stats/alerts.go           stats/audit.go
+stats/totals.go
 ```
 
 ---

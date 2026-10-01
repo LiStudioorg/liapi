@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	pathpkg "path"
 	"strconv"
 	"strings"
 	"time"
@@ -17,6 +18,20 @@ import (
 )
 
 func (s *Server) adminUI(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(r.URL.Path, "/")
+	if path == "" {
+		path = "index.html"
+	}
+
+	// Serve the exact asset when it exists in the embedded FS.
+	if data, err := ui.ReadFile("adminui/" + path); err == nil {
+		writeEmbedded(w, path, data)
+		return
+	}
+
+	// SPA fallback: unknown paths are client-side routes → index.html.
+	// (Static asset paths like /_nuxt/*.js should never reach here, but if a
+	// hashed asset is missing, falling back to HTML keeps the app booting.)
 	data, err := ui.ReadFile("adminui/index.html")
 	if err != nil {
 		http.Error(w, "admin ui not embedded", http.StatusInternalServerError)
@@ -25,6 +40,125 @@ func (s *Server) adminUI(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	_, _ = w.Write(data)
+}
+
+// writeEmbedded serves an embedded asset with an appropriate content type and
+// aggressive caching for immutable hashed assets under /_nuxt/.
+func writeEmbedded(w http.ResponseWriter, path string, data []byte) {
+	switch {
+	case strings.HasPrefix(path, "_nuxt/"):
+		// Hashed filenames — safe to cache forever.
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	default:
+		w.Header().Set("Cache-Control", "no-store")
+	}
+	w.Header().Set("Content-Type", contentTypeFor(path))
+	_, _ = w.Write(data)
+}
+
+// contentTypeFor maps a filename extension to a MIME type for the handful of
+// asset kinds produced by the Nuxt build.
+func contentTypeFor(path string) string {
+	switch strings.ToLower(pathpkg.Ext(path)) {
+	case ".html":
+		return "text/html; charset=utf-8"
+	case ".js", ".mjs":
+		return "text/javascript; charset=utf-8"
+	case ".css":
+		return "text/css; charset=utf-8"
+	case ".json":
+		return "application/json; charset=utf-8"
+	case ".svg":
+		return "image/svg+xml"
+	case ".png":
+		return "image/png"
+	case ".jpg", ".jpeg":
+		return "image/jpeg"
+	case ".ico":
+		return "image/x-icon"
+	case ".woff":
+		return "font/woff"
+	case ".woff2":
+		return "font/woff2"
+	case ".map":
+		return "application/json; charset=utf-8"
+	default:
+		return "application/octet-stream"
+	}
+}
+
+// adminLogin exchanges username/password for a short-lived session token.
+// It is not wrapped in requireAdmin (there is no session yet) but still
+// enforces the IP allowlist, per-IP lockout and rate limit so the login form
+// cannot be brute-forced.
+func (s *Server) adminLogin(w http.ResponseWriter, r *http.Request) {
+	cfg := s.holder.Get()
+	ip := clientIP(r)
+	audit := func(ok bool, reason string) {
+		s.audit.Add(stats.AuditEvent{
+			IP: ip, Method: r.Method, Path: r.URL.Path, OK: ok, Reason: reason,
+		})
+	}
+	if !ipAllowed(ip, cfg.AdminAllowIPs) {
+		s.metrics.IncAdminDenied()
+		audit(false, "ip_forbidden")
+		common.WriteError(w, http.StatusForbidden, "ip not allowed", "permission_error", "ip_forbidden")
+		return
+	}
+	if locked, until := s.adminAuth.Locked(ip); locked {
+		s.metrics.IncAdminLocked()
+		audit(false, "locked_out")
+		common.WriteError(w, http.StatusTooManyRequests,
+			"account temporarily locked after repeated failures ("+until.Round(time.Second).String()+" left)",
+			"rate_limit_error", "admin_locked")
+		return
+	}
+	if !s.adminLimit.Allow("ip:" + ip) {
+		s.metrics.IncAdminDenied()
+		audit(false, "rate_limited")
+		common.WriteError(w, http.StatusTooManyRequests, "admin rate limit exceeded", "rate_limit_error", "rate_limit_exceeded")
+		return
+	}
+	var req struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+		common.WriteError(w, http.StatusBadRequest, "invalid JSON body", "invalid_request_error", "")
+		return
+	}
+	token, ok := s.adminAuth.Login(req.Username, req.Password)
+	if !ok {
+		s.metrics.IncAdminDenied()
+		lockedNow := s.adminAuth.RecordFailure(ip)
+		if lockedNow {
+			s.metrics.IncAdminLocked()
+			audit(false, "bad_login_locked")
+		} else {
+			audit(false, "bad_login")
+		}
+		common.WriteError(w, http.StatusUnauthorized, "invalid username or password", "invalid_request_error", "invalid_credentials")
+		return
+	}
+	s.adminAuth.ClearFailures(ip)
+	audit(true, "")
+	common.WriteJSON(w, http.StatusOK, map[string]string{
+		"token":    token,
+		"username": req.Username,
+	})
+}
+
+// adminLogout invalidates the caller's session token.
+func (s *Server) adminLogout(w http.ResponseWriter, r *http.Request) {
+	if t := s.adminAuth.Credential(r); t != "" {
+		s.adminAuth.Logout(t)
+	}
+	common.WriteJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+// adminMe reports the identity behind the current credential.
+func (s *Server) adminMe(w http.ResponseWriter, r *http.Request) {
+	common.WriteJSON(w, http.StatusOK, map[string]string{"username": s.holder.Get().AdminUsername})
 }
 
 func (s *Server) adminOverview(w http.ResponseWriter, r *http.Request) {
@@ -591,6 +725,9 @@ func (s *Server) adminGetConfig(w http.ResponseWriter, r *http.Request) {
 	if cfg.AdminToken != "" {
 		cfg.AdminToken = common.MaskToken(cfg.AdminToken)
 	}
+	if cfg.AdminPasswordHash != "" {
+		cfg.AdminPasswordHash = common.MaskToken(cfg.AdminPasswordHash)
+	}
 	for i := range cfg.ClientTokens {
 		cfg.ClientTokens[i] = common.MaskToken(cfg.ClientTokens[i])
 	}
@@ -758,6 +895,9 @@ func resolveMaskedSecrets(old, next *config.Config) {
 
 	if isMasked(next.AdminToken) {
 		next.AdminToken = old.AdminToken
+	}
+	if isMasked(next.AdminPasswordHash) {
+		next.AdminPasswordHash = old.AdminPasswordHash
 	}
 
 	oldUps := make(map[string]string, len(old.Upstreams))

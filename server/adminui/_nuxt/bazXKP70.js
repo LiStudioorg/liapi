@@ -1,0 +1,1 @@
+import{t as e}from"./BOgT-xSl.js";var t=e(`chevron-right`,[[`path`,{d:`m9 18 6-6-6-6`,key:`mthhwq`}]]),n=e(`minus`,[[`path`,{d:`M5 12h14`,key:`1ays0h`}]]);export{t as n,n as t};
